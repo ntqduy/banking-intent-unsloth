@@ -1,0 +1,36 @@
+{
+  "raw": {
+    "train_samples": 10003,
+    "test_samples": 3080,
+    "total_samples": 13083
+  },
+  "clean": {
+    "train_samples": 9157,
+    "val_samples": 1309,
+    "test_samples": 2617,
+    "total_samples": 13083
+  },
+  "num_labels": 77,
+  "category_summary": {
+    "train": {
+      "min": 53,
+      "max": 158,
+      "avg": 118.92
+    },
+    "val": {
+      "min": 7,
+      "max": 23,
+      "avg": 17.0
+    },
+    "test": {
+      "min": 15,
+      "max": 46,
+      "avg": 33.99
+    },
+    "total": {
+      "min": 75,
+      "max": 227,
+      "avg": 169.91
+    }
+  }
+}

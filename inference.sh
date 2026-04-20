@@ -1,0 +1,1 @@
+python scripts/inference.py --config configs/inference.yaml --message "my card has not arrived yet"

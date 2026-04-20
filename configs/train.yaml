@@ -1,0 +1,24 @@
+model_name: distilbert-base-uncased
+
+train_csv: sample_data/clean_data/train.csv
+val_csv: sample_data/clean_data/val.csv
+test_csv: sample_data/clean_data/test.csv
+
+label2id_path: outputs/label2id.json
+id2label_path: outputs/id2label.json
+
+output_dir: outputs/model_checkpoint
+
+max_length: 64
+batch_size: 16
+learning_rate: 2.0e-5
+optimizer: adamw_torch
+num_train_epochs: 3
+weight_decay: 0.01
+warmup_ratio: 0.1
+regularization_techniques:
+  - weight_decay
+augmentation_techniques:
+  - none
+logging_steps: 10
+seed: 42

@@ -1,0 +1,3 @@
+model_dir: outputs/model_checkpoint
+id2label_path: outputs/id2label.json
+max_length: 64
