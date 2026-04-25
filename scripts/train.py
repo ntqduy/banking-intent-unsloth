@@ -1,6 +1,8 @@
 import argparse
 import json
 import os
+from datetime import datetime, timezone
+from time import perf_counter
 
 import matplotlib
 import numpy as np
@@ -24,7 +26,33 @@ REQUIRED_COLUMNS = ["text", "label", "label_name"]
 
 def load_config(config_path: str):
     with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f) or {}
+
+
+def write_json(path: str, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(to_serializable(data), f, ensure_ascii=False, indent=2)
+
+
+def to_serializable(value):
+    if isinstance(value, dict):
+        return {str(k): to_serializable(v) for k, v in value.items()}
+
+    if isinstance(value, (list, tuple)):
+        return [to_serializable(v) for v in value]
+
+    if isinstance(value, np.generic):
+        return value.item()
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    return value
+
+
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def load_split(csv_path: str, split_name: str) -> pd.DataFrame:
@@ -68,7 +96,7 @@ def to_dataset(df: pd.DataFrame) -> Dataset:
     return Dataset.from_pandas(df[["text", "label"]], preserve_index=False)
 
 
-def save_training_plots(log_history, output_dir: str):
+def save_training_plots(log_history, report_dir: str):
     train_loss_points = []
     eval_loss_points = []
     metric_points = {
@@ -92,8 +120,8 @@ def save_training_plots(log_history, output_dir: str):
                 if metric_key in log:
                     metric_points[metric_name].append((epoch, float(log[metric_key])))
 
-    loss_plot_path = os.path.join(output_dir, "loss_curve.png")
-    metrics_plot_path = os.path.join(output_dir, "metric_performance.png")
+    loss_plot_path = os.path.join(report_dir, "line_loss.png")
+    metrics_plot_path = os.path.join(report_dir, "line_performance.png")
 
     if train_loss_points or eval_loss_points:
         plt.figure(figsize=(10, 6))
@@ -106,9 +134,9 @@ def save_training_plots(log_history, output_dir: str):
         if eval_loss_points:
             eval_epochs = [x[0] for x in eval_loss_points]
             eval_losses = [x[1] for x in eval_loss_points]
-            plt.plot(eval_epochs, eval_losses, marker="s", label="eval_loss")
+            plt.plot(eval_epochs, eval_losses, marker="s", label="val_loss")
 
-        plt.title("Loss During Fine-tuning")
+        plt.title("Training and Validation Loss")
         plt.xlabel("Step / Epoch")
         plt.ylabel("Loss")
         plt.legend()
@@ -129,7 +157,7 @@ def save_training_plots(log_history, output_dir: str):
             values = [x[1] for x in points]
             plt.plot(epochs, values, marker="o", label=metric_name)
 
-        plt.title("Metric Performance During Fine-tuning")
+        plt.title("Validation Metric Performance")
         plt.xlabel("Epoch")
         plt.ylabel("Score")
         plt.ylim(0, 1)
@@ -140,9 +168,81 @@ def save_training_plots(log_history, output_dir: str):
         plt.close()
 
     return {
-        "loss_plot": loss_plot_path if train_loss_points or eval_loss_points else None,
-        "metrics_plot": metrics_plot_path if has_metric_points else None,
+        "line_loss": loss_plot_path if train_loss_points or eval_loss_points else None,
+        "line_performance": metrics_plot_path if has_metric_points else None,
     }
+
+
+def save_log_history(log_history, report_dir: str):
+    history_df = pd.DataFrame([to_serializable(log) for log in log_history])
+    history_path = os.path.join(report_dir, "train_log_history.csv")
+    history_df.to_csv(history_path, index=False)
+    return history_path
+
+
+def count_parameters(model):
+    total = sum(param.numel() for param in model.parameters())
+    trainable = sum(param.numel() for param in model.parameters() if param.requires_grad)
+    return {
+        "total_parameters": int(total),
+        "trainable_parameters": int(trainable),
+        "non_trainable_parameters": int(total - trainable),
+    }
+
+
+def build_metrics_row(stage: str, metrics: dict, prefix: str, wall_time_seconds: float):
+    row = {
+        "stage": stage,
+        "loss": metrics.get(f"{prefix}_loss"),
+        "accuracy": metrics.get(f"{prefix}_accuracy"),
+        "precision": metrics.get(f"{prefix}_precision"),
+        "recall": metrics.get(f"{prefix}_recall"),
+        "f1": metrics.get(f"{prefix}_f1"),
+        "runtime_seconds": metrics.get(f"{prefix}_runtime"),
+        "samples_per_second": metrics.get(f"{prefix}_samples_per_second"),
+        "steps_per_second": metrics.get(f"{prefix}_steps_per_second"),
+        "epoch": metrics.get("epoch"),
+        "total_flos": metrics.get("total_flos"),
+        "wall_time_seconds": wall_time_seconds,
+    }
+    return {k: to_serializable(v) for k, v in row.items()}
+
+
+def build_train_metrics_row(train_metrics: dict, wall_time_seconds: float):
+    row = {
+        "stage": "train",
+        "loss": train_metrics.get("train_loss"),
+        "accuracy": train_metrics.get("train_accuracy"),
+        "precision": train_metrics.get("train_precision"),
+        "recall": train_metrics.get("train_recall"),
+        "f1": train_metrics.get("train_f1"),
+        "runtime_seconds": train_metrics.get("train_runtime"),
+        "samples_per_second": train_metrics.get("train_samples_per_second"),
+        "steps_per_second": train_metrics.get("train_steps_per_second"),
+        "epoch": train_metrics.get("epoch"),
+        "total_flos": train_metrics.get("total_flos"),
+        "wall_time_seconds": wall_time_seconds,
+    }
+    return {k: to_serializable(v) for k, v in row.items()}
+
+
+def build_model_info(model, tokenizer, config, dataset_sizes):
+    model_config = model.config.to_dict()
+    hidden_size = model_config.get("hidden_size", model_config.get("dim"))
+
+    info = {
+        "model_name": config["model_name"],
+        "model_type": model_config.get("model_type"),
+        "architectures": model_config.get("architectures"),
+        "num_labels": model_config.get("num_labels"),
+        "hidden_size": hidden_size,
+        "vocab_size": model_config.get("vocab_size"),
+        "max_position_embeddings": model_config.get("max_position_embeddings"),
+        "tokenizer_vocab_size": getattr(tokenizer, "vocab_size", None),
+        "dataset_sizes": dataset_sizes,
+    }
+    info.update(count_parameters(model))
+    return info
 
 
 def main(config_path: str):
@@ -161,6 +261,11 @@ def main(config_path: str):
     train_df = load_split(config["train_csv"], "train")
     val_df = load_split(config["val_csv"], "val")
     test_df = load_split(config["test_csv"], "test")
+    dataset_sizes = {
+        "train_samples": int(len(train_df)),
+        "val_samples": int(len(val_df)),
+        "test_samples": int(len(test_df)),
+    }
 
     tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
 
@@ -191,10 +296,11 @@ def main(config_path: str):
         id2label=id2label,
     )
 
-    os.makedirs(config["output_dir"], exist_ok=True)
+    output_dir = ensure_dir(config["output_dir"])
+    report_dir = ensure_dir(config.get("report_dir", os.path.join(output_dir, "train_report")))
 
     training_args = TrainingArguments(
-        output_dir=config["output_dir"],
+        output_dir=output_dir,
         eval_strategy="epoch",
         save_strategy="epoch",
         logging_strategy="steps",
@@ -223,16 +329,86 @@ def main(config_path: str):
         compute_metrics=compute_metrics,
     )
 
+    run_started_at = datetime.now(timezone.utc)
+    total_start = perf_counter()
+
     print("===== TRAINING CONFIG =====")
     print(f"Optimizer: {config['optimizer']}")
     print(f"Regularization techniques: {config['regularization_techniques']}")
     print(f"Augmentation techniques: {config['augmentation_techniques']}")
+    print(f"Train report dir: {report_dir}")
 
-    trainer.train()
-    plot_paths = save_training_plots(trainer.state.log_history, config["output_dir"])
+    train_start = perf_counter()
+    train_result = trainer.train()
+    train_wall_time = perf_counter() - train_start
 
+    log_history_path = save_log_history(trainer.state.log_history, report_dir)
+    plot_paths = save_training_plots(trainer.state.log_history, report_dir)
+
+    val_start = perf_counter()
     val_results = trainer.evaluate(eval_dataset=val_dataset, metric_key_prefix="val")
+    val_wall_time = perf_counter() - val_start
+
+    test_start = perf_counter()
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix="test")
+    test_wall_time = perf_counter() - test_start
+
+    total_wall_time = perf_counter() - total_start
+    run_finished_at = datetime.now(timezone.utc)
+
+    metrics_rows = [
+        build_train_metrics_row(train_result.metrics, train_wall_time),
+        build_metrics_row("validation", val_results, "val", val_wall_time),
+        build_metrics_row("test", test_results, "test", test_wall_time),
+    ]
+    metrics_df = pd.DataFrame(metrics_rows)
+    metrics_csv_path = os.path.join(report_dir, "metrics.csv")
+    metrics_df.to_csv(metrics_csv_path, index=False)
+
+    time_summary = {
+        "started_at_utc": run_started_at,
+        "finished_at_utc": run_finished_at,
+        "train_wall_time_seconds": train_wall_time,
+        "validation_wall_time_seconds": val_wall_time,
+        "test_wall_time_seconds": test_wall_time,
+        "total_wall_time_seconds": total_wall_time,
+    }
+
+    train_params = {
+        "config": config,
+        "training_arguments": training_args.to_dict(),
+        "dataset_sizes": dataset_sizes,
+    }
+
+    model_info = build_model_info(model, tokenizer, config, dataset_sizes)
+
+    summary = {
+        "report_dir": report_dir,
+        "output_dir": output_dir,
+        "metrics_csv": metrics_csv_path,
+        "train_log_history_csv": log_history_path,
+        "plots": plot_paths,
+        "time_summary": time_summary,
+        "train_metrics": train_result.metrics,
+        "validation_metrics": val_results,
+        "test_metrics": test_results,
+        "train_params": train_params,
+        "model_info": model_info,
+    }
+
+    trainer.save_model(output_dir)
+    tokenizer.save_pretrained(output_dir)
+
+    with open(os.path.join(output_dir, "label2id.json"), "w", encoding="utf-8") as f:
+        json.dump(label2id, f, ensure_ascii=False, indent=2)
+
+    with open(os.path.join(output_dir, "id2label.json"), "w", encoding="utf-8") as f:
+        json.dump({str(k): v for k, v in id2label.items()}, f, ensure_ascii=False, indent=2)
+
+    write_json(os.path.join(report_dir, "time_summary.json"), time_summary)
+    write_json(os.path.join(report_dir, "train_params.json"), train_params)
+    write_json(os.path.join(report_dir, "model_params.json"), model_info)
+    write_json(os.path.join(report_dir, "summary.json"), summary)
 
     print("===== VALIDATION RESULTS =====")
     for key, value in val_results.items():
@@ -242,20 +418,13 @@ def main(config_path: str):
     for key, value in test_results.items():
         print(f"{key}: {value}")
 
-    trainer.save_model(config["output_dir"])
-    tokenizer.save_pretrained(config["output_dir"])
-
-    with open(os.path.join(config["output_dir"], "label2id.json"), "w", encoding="utf-8") as f:
-        json.dump(label2id, f, ensure_ascii=False, indent=2)
-
-    with open(os.path.join(config["output_dir"], "id2label.json"), "w", encoding="utf-8") as f:
-        json.dump({str(k): v for k, v in id2label.items()}, f, ensure_ascii=False, indent=2)
-
-    print(f"Model checkpoint and tokenizer saved to: {config['output_dir']}")
-    if plot_paths["loss_plot"]:
-        print(f"Loss curve saved to: {plot_paths['loss_plot']}")
-    if plot_paths["metrics_plot"]:
-        print(f"Metric performance plot saved to: {plot_paths['metrics_plot']}")
+    print(f"Model checkpoint and tokenizer saved to: {output_dir}")
+    print(f"Training metrics saved to: {metrics_csv_path}")
+    print(f"Training log history saved to: {log_history_path}")
+    if plot_paths["line_loss"]:
+        print(f"Loss curve saved to: {plot_paths['line_loss']}")
+    if plot_paths["line_performance"]:
+        print(f"Performance curve saved to: {plot_paths['line_performance']}")
 
 
 if __name__ == "__main__":

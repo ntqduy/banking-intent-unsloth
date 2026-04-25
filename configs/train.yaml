@@ -8,6 +8,7 @@ label2id_path: outputs/label2id.json
 id2label_path: outputs/id2label.json
 
 output_dir: outputs/model_checkpoint
+report_dir: outputs/train_report
 
 max_length: 64
 batch_size: 16
