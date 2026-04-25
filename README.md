@@ -1,276 +1,194 @@
-# BANKING77 Intent Detection (DistilBERT)
+# BANKING77 Intent Detection with Unsloth
 
-## Project Overview
+This project fine-tunes an intent detection model on a sampled subset of BANKING77 using Unsloth LoRA/QLoRA. The model is trained as an instruction-style classifier: given a banking customer message and the allowed intent labels, it generates exactly one intent label.
 
-This project fine-tunes a sequence classification model for intent detection using the BANKING77 dataset from HuggingFace.
+## Project Structure
 
-The pipeline supports:
-
-- downloading and saving the original BANKING77 data
-- text preprocessing
-- train/validation/test split creation
-- training DistilBERT for intent classification
-- evaluation with accuracy, precision, recall, and F1-score
-- standalone inference from a saved checkpoint
+```text
+banking-intent-unsloth/
+|-- scripts/
+|   |-- preprocess_data.py
+|   |-- train.py
+|   |-- inference.py
+|-- configs/
+|   |-- train.yaml
+|   |-- inference.yaml
+|   |-- inference_base.yaml
+|-- sample_data/
+|   |-- original/
+|   |   |-- train.csv
+|   |   |-- test.csv
+|   |-- clean_data/
+|   |   |-- train.csv
+|   |   |-- val.csv
+|   |   |-- test.csv
+|-- outputs/
+|   |-- outputs_train/
+|   |   |-- analysis_data/
+|   |   |-- model_checkpoint/
+|   |-- outputs_inf_finetune/
+|   |-- outputs_inf_base/
+|-- train.sh
+|-- inference.sh
+|-- requirements.txt
+|-- README.md
+```
 
 ## Environment Setup
 
-### 1. Create and activate a virtual environment
-
-Windows (PowerShell):
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-Linux/macOS:
+Unsloth is best run on Linux, Google Colab, or Kaggle with a CUDA GPU.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-```
-
-### 2. Install dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
-## Data Download and Preprocessing
+On Windows, use WSL2 or run the notebook/script on Colab/Kaggle if Unsloth or `bitsandbytes` installation fails.
 
-Run:
+## Data Preparation
+
+The dataset is BANKING77. By default, preprocessing samples at most 40 examples per intent label so training can finish on limited GPU resources.
 
 ```bash
 python scripts/preprocess_data.py
 ```
 
-What this does:
-
-1. Loads full BANKING77 dataset from HuggingFace.
-2. Saves original data to:
-	- sample_data/original/train.csv
-	- sample_data/original/test.csv
-	- sample_data/original/category.json
-3. Preprocesses text by:
-	- lowercasing
-	- stripping surrounding spaces
-	- removing newline characters
-	- collapsing repeated spaces
-4. Builds label mappings and saves:
-	- outputs/label2id.json
-	- outputs/id2label.json
-5. Creates reproducible stratified train/val/test splits.
-6. Saves cleaned splits with columns text, label, label_name to:
-	- sample_data/clean_data/train.csv
-	- sample_data/clean_data/val.csv
-	- sample_data/clean_data/test.csv
-
-Optional arguments:
+Useful options:
 
 ```bash
-python scripts/preprocess_data.py --test_size 0.2 --val_size 0.1 --seed 42
+python scripts/preprocess_data.py --samples_per_label 40 --val_size 0.1 --seed 42
+python scripts/preprocess_data.py --samples_per_label 0
 ```
 
-## Training
+Original raw files are kept in `sample_data/original` and are not rewritten when cached files already exist. Model-ready data is saved only under `sample_data/clean_data`.
 
-Training configuration is stored in configs/train.yaml.
+Generated model data:
 
-Default model and task:
+- `sample_data/clean_data/train.csv`
+- `sample_data/clean_data/val.csv`
+- `sample_data/clean_data/test.csv`
+- `outputs/outputs_train/analysis_data/label2id.json`
+- `outputs/outputs_train/analysis_data/id2label.json`
+- `outputs/outputs_train/analysis_data/dataset_statistics.json`
+- `outputs/outputs_train/analysis_data/category_statistics.csv`
 
-- model: distilbert-base-uncased
-- task: sequence classification
-- dataset: full BANKING77 (processed train/val/test splits)
+Preprocessing includes lowercasing, whitespace cleanup, label mapping, optional per-label sampling from the original train split, and stratified train/validation splitting. The test split is the original BANKING77 test split after the same text normalization.
 
-Configured hyperparameters:
+## Fine-Tuning with Unsloth
 
-- max_length: 64
-- batch_size: 16
-- learning_rate: 2e-5
-- optimizer: adamw_torch
-- num_train_epochs: 3
-- weight_decay: 0.01
-- warmup_ratio: 0.1
+Training configuration is in `configs/train.yaml`.
 
-Evaluation metrics:
+Default model:
 
-- accuracy
-- precision
-- recall
-- f1
+- `unsloth/Qwen2.5-0.5B-Instruct-bnb-4bit`
 
-Run training:
+Main hyperparameters:
+
+| Hyperparameter | Value |
+|---|---:|
+| max sequence length | 512 |
+| batch size | 2 |
+| gradient accumulation steps | 8 |
+| effective batch size | 16 |
+| learning rate | 2e-4 |
+| optimizer | adamw_8bit |
+| epochs | 3 |
+| warmup ratio | 0.1 |
+| weight decay | 0.01 |
+| LoRA rank | 16 |
+| LoRA alpha | 16 |
+| LoRA dropout | 0.0 |
+| quantization | 4-bit QLoRA |
+
+Train:
 
 ```bash
 python scripts/train.py --config configs/train.yaml
 ```
 
-Artifacts saved to:
-
-- outputs/model_checkpoint/
-- outputs/model_checkpoint/label2id.json
-- outputs/model_checkpoint/id2label.json
-
-## Model Configuration
-
-Model used:
-
-- backbone: distilbert-base-uncased
-- task: sequence classification (intent detection)
-
-Main configuration (configs/train.yaml):
-
-- max_length: 64
-- batch_size: 16
-- learning_rate: 2e-5
-- optimizer: adamw_torch
-- num_train_epochs: 3
-- weight_decay: 0.01
-- warmup_ratio: 0.1
-- regularization: weight_decay
-- augmentation: none
-
-Dataset size with default split (test_size=0.2, val_size=0.1):
-
-| Split | Samples | Number of categories |
-|------|---------|----------------------|
-| raw train | 10003 | 77 |
-| raw test | 3080 | 77 |
-| clean train | 9157 | 77 |
-| clean val | 1309 | 77 |
-| clean test | 2617 | 77 |
-| clean total | 13083 | 77 |
-
-Category distribution summary (default split):
-
-| Scope | Min per category | Max per category | Avg per category |
-|------|-------------------|------------------|------------------|
-| train | 53 | 158 | 118.92 |
-| val | 7 | 23 | 17.00 |
-| test | 15 | 46 | 33.99 |
-| total | 75 | 227 | 169.91 |
-
-Statistics files generated on every preprocess run:
-
-- outputs/dataset_statistics.json
-- outputs/category_statistics.csv
-
-Note:
-
-- These sizes are generated by scripts/preprocess_data.py with the default parameters.
-- If you change test_size or val_size, sample counts and category statistics will change accordingly.
-
-## Inference
-
-Inference uses the required standalone class:
-
-- IntentClassification.__init__(self, model_path)
-- IntentClassification.__call__(self, message)
-
-Run:
-
-```bash
-python scripts/inference.py --config configs/inference.yaml --message "my card has not arrived yet"
-```
-
-Expected output:
-
-- Input message: ...
-- Predicted label: <intent_name>
-
-## Shell Helpers
-
-Run full pipeline:
+Or run the full pipeline:
 
 ```bash
 bash train.sh
 ```
 
-Run example inference:
+Saved artifacts:
 
-```bash
-bash inference.sh
+- `outputs/outputs_train/model_checkpoint/` LoRA checkpoint and tokenizer
+- `outputs/outputs_train/model_checkpoint/label2id.json`
+- `outputs/outputs_train/model_checkpoint/id2label.json`
+- `outputs/outputs_train/metrics.csv`
+- `outputs/outputs_train/metrics.json`
+- `outputs/outputs_train/train_log_history.csv`
+- `outputs/outputs_train/loss_curve.png`
+- `outputs/outputs_train/loss_curve.pdf`
+- `outputs/outputs_train/performance_metrics.png`
+- `outputs/outputs_train/performance_metrics.pdf`
+- `outputs/outputs_train/val_predictions.csv`
+- `outputs/outputs_train/test_predictions.csv`
+- `outputs/outputs_train/train_config.json`
+- `outputs/outputs_train/model_params.json`
+- `outputs/outputs_train/summary.json`
+
+## Inference
+
+The required grading interface is implemented in `scripts/inference.py`:
+
+```python
+from scripts.inference import IntentClassification
+
+classifier = IntentClassification("configs/inference.yaml")
+predicted_label = classifier("my card has not arrived yet")
+print(predicted_label)
 ```
 
-## Folder Structure
-
-```text
-banking-intent-unsloth/
-├── scripts/
-│   ├── preprocess_data.py
-│   ├── train.py
-│   ├── inference.py
-├── configs/
-│   ├── train.yaml
-│   ├── inference.yaml
-├── sample_data/
-│   ├── original/
-│   │   ├── train.csv
-│   │   ├── test.csv
-│   │   ├── category.json
-│   ├── clean_data/
-│   │   ├── train.csv
-│   │   ├── val.csv
-│   │   ├── test.csv
-├── outputs/
-│   ├── model_checkpoint/
-│   ├── label2id.json
-│   ├── id2label.json
-├── train.sh
-├── inference.sh
-├── requirements.txt
-├── README.md
-```
-
-## Expected Outputs
-
-After preprocessing:
-
-- sample_data/original/train.csv
-- sample_data/original/test.csv
-- sample_data/original/category.json
-- sample_data/clean_data/train.csv
-- sample_data/clean_data/val.csv
-- sample_data/clean_data/test.csv
-- outputs/label2id.json
-- outputs/id2label.json
-
-After training:
-
-- outputs/model_checkpoint/ (model weights + config)
-- tokenizer files in outputs/model_checkpoint/
-- outputs/model_checkpoint/label2id.json
-- outputs/model_checkpoint/id2label.json
-- outputs/model_checkpoint/loss_curve.png
-- outputs/model_checkpoint/metric_performance.png
-
-## Output Comparison (Before vs After Fine-tuning)
-
-Use this table to report your lab results after running training:
-
-| Model | Accuracy | Precision | Recall | F1 |
-|------|----------|-----------|--------|----|
-| DistilBERT (before fine-tuning) | ... | ... | ... | ... |
-| DistilBERT (after fine-tuning)  | ... | ... | ... | ... |
-
-How to read this comparison:
-
-- before fine-tuning: evaluate pretrained distilbert-base-uncased without domain fine-tuning
-- after fine-tuning: evaluate the checkpoint from outputs/model_checkpoint
-
-## Sample Inference Outputs
-
-Example command:
+Run a single example:
 
 ```bash
 python scripts/inference.py --config configs/inference.yaml --message "my card has not arrived yet"
 ```
 
-Sample predictions (illustrative format):
+Run test-set evaluation:
 
-- input: my card has not arrived yet
-	- predicted label: card_arrival
-- input: i was charged twice for one transaction
-	- predicted label: transaction_charged_twice
-- input: my cash withdrawal fee looks wrong
-	- predicted label: cash_withdrawal_charge
+```bash
+python scripts/inference.py --config configs/inference.yaml
+```
+
+Evaluate the base model before fine-tuning:
+
+```bash
+python scripts/inference.py --config configs/inference_base.yaml
+```
+
+Shell helper:
+
+```bash
+bash inference.sh finetuned "my card has not arrived yet"
+bash inference.sh base "my card has not arrived yet"
+```
+
+Inference reports are saved to:
+
+- Fine-tuned: `outputs/outputs_inf_finetune/`
+- Base: `outputs/outputs_inf_base/`
+- Each inference report contains `metrics.csv`, `predictions.csv`, `correct_samples.csv`, `wrong_samples.csv`, `sample_predictions.csv`, and `summary.json`.
+- Metrics include accuracy, precision, recall, F1, latency, throughput in samples/second, and generated tokens/second.
+- Single-message inference is saved to `single_prediction.json`.
+
+## Result Table
+
+Fill this table after running training and inference:
+
+| Model | Accuracy | Precision | Recall | F1 |
+|---|---:|---:|---:|---:|
+| Base Qwen2.5-0.5B-Instruct | ... | ... | ... | ... |
+| Fine-tuned Unsloth LoRA model | ... | ... | ... | ... |
+
+## Video Demonstration
+
+Add the Google Drive video link here after recording the demo:
+
+- Video link: ...
+
+The video should show running inference, at least one input message, the predicted intent label, and the final test accuracy.

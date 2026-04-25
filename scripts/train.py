@@ -1,25 +1,36 @@
 import argparse
 import json
 import os
+import re
 from datetime import datetime, timezone
 from time import perf_counter
 
-import matplotlib
+try:
+    from unsloth import FastLanguageModel
+except ImportError as exc:
+    raise ImportError(
+        "Unsloth is required for this training script. Install the project dependencies "
+        "with `pip install -r requirements.txt` on Linux/Colab/Kaggle, then run again."
+    ) from exc
+
 import numpy as np
 import pandas as pd
+import torch
 import yaml
+import matplotlib
 from datasets import Dataset
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from transformers import (
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-    Trainer,
-    TrainingArguments,
-    set_seed,
-)
+from transformers import TrainingArguments, set_seed
+from trl import SFTTrainer
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+try:
+    from trl import SFTConfig
+except ImportError:
+    SFTConfig = None
+
 
 REQUIRED_COLUMNS = ["text", "label", "label_name"]
 
@@ -29,35 +40,30 @@ def load_config(config_path: str):
         return yaml.safe_load(f) or {}
 
 
-def write_json(path: str, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(to_serializable(data), f, ensure_ascii=False, indent=2)
-
-
-def to_serializable(value):
-    if isinstance(value, dict):
-        return {str(k): to_serializable(v) for k, v in value.items()}
-
-    if isinstance(value, (list, tuple)):
-        return [to_serializable(v) for v in value]
-
-    if isinstance(value, np.generic):
-        return value.item()
-
-    if isinstance(value, datetime):
-        return value.isoformat()
-
-    return value
-
-
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
     return path
 
 
+def to_serializable(value):
+    if isinstance(value, dict):
+        return {str(k): to_serializable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_serializable(v) for v in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def write_json(path: str, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(to_serializable(data), f, ensure_ascii=False, indent=2)
+
+
 def load_split(csv_path: str, split_name: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
-
     missing_columns = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing_columns:
         raise ValueError(
@@ -72,10 +78,59 @@ def load_split(csv_path: str, split_name: str) -> pd.DataFrame:
     return df
 
 
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    preds = np.argmax(logits, axis=-1)
+def load_label_mappings(config):
+    with open(config["label2id_path"], "r", encoding="utf-8") as f:
+        label2id = json.load(f)
+    with open(config["id2label_path"], "r", encoding="utf-8") as f:
+        id2label_raw = json.load(f)
 
+    id2label = {int(k): v for k, v in id2label_raw.items()}
+    return label2id, id2label
+
+
+def build_label_list(id2label: dict) -> str:
+    return ", ".join(id2label[idx] for idx in sorted(id2label))
+
+
+def normalize_generated_label(text: str, label2id: dict):
+    cleaned = str(text).strip().lower()
+    cleaned = cleaned.splitlines()[0] if cleaned else ""
+    cleaned = re.sub(r"[^a-z0-9_]+", "_", cleaned).strip("_")
+
+    if cleaned in label2id:
+        return cleaned
+
+    for label in label2id:
+        if label.lower() in cleaned:
+            return label
+
+    return cleaned
+
+
+def build_prompt(message: str, label_list: str, response: str | None = None) -> str:
+    prompt = (
+        "You are an intent classifier for banking customer messages.\n"
+        "Choose exactly one intent label from the allowed labels.\n"
+        f"Allowed labels: {label_list}\n"
+        f"Message: {message}\n"
+        "Intent:"
+    )
+
+    if response is None:
+        return prompt
+
+    return f"{prompt} {response}"
+
+
+def to_sft_dataset(df: pd.DataFrame, label_list: str) -> Dataset:
+    rows = [
+        {"text": build_prompt(row.text, label_list, row.label_name)}
+        for row in df.itertuples(index=False)
+    ]
+    return Dataset.from_list(rows)
+
+
+def compute_metrics(labels, preds):
     accuracy = accuracy_score(labels, preds)
     precision, recall, f1, _ = precision_recall_fscore_support(
         labels,
@@ -83,100 +138,90 @@ def compute_metrics(eval_pred):
         average="weighted",
         zero_division=0,
     )
-
     return {
-        "accuracy": accuracy,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
+        "accuracy": float(accuracy),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
     }
 
 
-def to_dataset(df: pd.DataFrame) -> Dataset:
-    return Dataset.from_pandas(df[["text", "label"]], preserve_index=False)
+def predict_labels(model, tokenizer, df: pd.DataFrame, label2id: dict, label_list: str, config: dict):
+    FastLanguageModel.for_inference(model)
+    device = next(model.parameters()).device
+    max_length = int(config["max_seq_length"])
+    max_new_tokens = int(config.get("max_new_tokens", 12))
+    batch_size = int(config.get("eval_batch_size", config["batch_size"]))
+
+    predicted_labels = []
+    started = perf_counter()
+
+    for start_idx in range(0, len(df), batch_size):
+        batch_messages = df.iloc[start_idx : start_idx + batch_size]["text"].tolist()
+        prompts = [build_prompt(message, label_list) for message in batch_messages]
+        inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+        ).to(device)
+
+        prompt_lengths = inputs["input_ids"].shape[1]
+        with torch.inference_mode():
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+        generated_ids = output_ids[:, prompt_lengths:]
+        generated_texts = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        predicted_labels.extend(
+            normalize_generated_label(text, label2id) for text in generated_texts
+        )
+
+    elapsed = perf_counter() - started
+    predicted_ids = [label2id.get(label, -1) for label in predicted_labels]
+    return predicted_labels, predicted_ids, elapsed
 
 
-def save_training_plots(log_history, report_dir: str):
-    train_loss_points = []
-    eval_loss_points = []
-    metric_points = {
-        "accuracy": [],
-        "precision": [],
-        "recall": [],
-        "f1": [],
-    }
-
-    for log in log_history:
-        if "loss" in log and "step" in log:
-            train_loss_points.append((int(log["step"]), float(log["loss"])))
-
-        if "eval_loss" in log and "epoch" in log:
-            eval_loss_points.append((float(log["epoch"]), float(log["eval_loss"])))
-
-        if "epoch" in log:
-            epoch = float(log["epoch"])
-            for metric_name in metric_points:
-                metric_key = f"eval_{metric_name}"
-                if metric_key in log:
-                    metric_points[metric_name].append((epoch, float(log[metric_key])))
-
-    loss_plot_path = os.path.join(report_dir, "line_loss.png")
-    metrics_plot_path = os.path.join(report_dir, "line_performance.png")
-
-    if train_loss_points or eval_loss_points:
-        plt.figure(figsize=(10, 6))
-
-        if train_loss_points:
-            train_steps = [x[0] for x in train_loss_points]
-            train_losses = [x[1] for x in train_loss_points]
-            plt.plot(train_steps, train_losses, marker="o", label="train_loss")
-
-        if eval_loss_points:
-            eval_epochs = [x[0] for x in eval_loss_points]
-            eval_losses = [x[1] for x in eval_loss_points]
-            plt.plot(eval_epochs, eval_losses, marker="s", label="val_loss")
-
-        plt.title("Training and Validation Loss")
-        plt.xlabel("Step / Epoch")
-        plt.ylabel("Loss")
-        plt.legend()
-        plt.grid(alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(loss_plot_path, dpi=200)
-        plt.close()
-
-    has_metric_points = any(len(points) > 0 for points in metric_points.values())
-    if has_metric_points:
-        plt.figure(figsize=(10, 6))
-
-        for metric_name, points in metric_points.items():
-            if not points:
-                continue
-
-            epochs = [x[0] for x in points]
-            values = [x[1] for x in points]
-            plt.plot(epochs, values, marker="o", label=metric_name)
-
-        plt.title("Validation Metric Performance")
-        plt.xlabel("Epoch")
-        plt.ylabel("Score")
-        plt.ylim(0, 1)
-        plt.legend()
-        plt.grid(alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(metrics_plot_path, dpi=200)
-        plt.close()
-
-    return {
-        "line_loss": loss_plot_path if train_loss_points or eval_loss_points else None,
-        "line_performance": metrics_plot_path if has_metric_points else None,
-    }
+def evaluate_generation(model, tokenizer, df, label2id, label_list, config, split_name):
+    predicted_labels, predicted_ids, elapsed = predict_labels(
+        model=model,
+        tokenizer=tokenizer,
+        df=df,
+        label2id=label2id,
+        label_list=label_list,
+        config=config,
+    )
+    true_ids = df["label"].tolist()
+    metrics = compute_metrics(true_ids, predicted_ids)
+    metrics.update(
+        {
+            "split": split_name,
+            "num_samples": int(len(df)),
+            "runtime_seconds": float(elapsed),
+            "samples_per_second": float(len(df) / elapsed) if elapsed > 0 else None,
+        }
+    )
+    predictions = pd.DataFrame(
+        {
+            "sample": df["text"].tolist(),
+            "ground_truth_id": true_ids,
+            "ground_truth_label": df["label_name"].tolist(),
+            "predicted_id": predicted_ids,
+            "predicted_label": predicted_labels,
+        }
+    )
+    predictions["correct"] = predictions["ground_truth_id"] == predictions["predicted_id"]
+    return metrics, predictions
 
 
 def save_log_history(log_history, report_dir: str):
-    history_df = pd.DataFrame([to_serializable(log) for log in log_history])
     history_path = os.path.join(report_dir, "train_log_history.csv")
-    history_df.to_csv(history_path, index=False)
+    pd.DataFrame([to_serializable(log) for log in log_history]).to_csv(history_path, index=False)
     return history_path
 
 
@@ -187,249 +232,309 @@ def count_parameters(model):
         "total_parameters": int(total),
         "trainable_parameters": int(trainable),
         "non_trainable_parameters": int(total - trainable),
+        "trainable_percent": float(trainable / total * 100.0) if total else 0.0,
     }
 
 
-def build_metrics_row(stage: str, metrics: dict, prefix: str, wall_time_seconds: float):
-    row = {
-        "stage": stage,
-        "loss": metrics.get(f"{prefix}_loss"),
-        "accuracy": metrics.get(f"{prefix}_accuracy"),
-        "precision": metrics.get(f"{prefix}_precision"),
-        "recall": metrics.get(f"{prefix}_recall"),
-        "f1": metrics.get(f"{prefix}_f1"),
-        "runtime_seconds": metrics.get(f"{prefix}_runtime"),
-        "samples_per_second": metrics.get(f"{prefix}_samples_per_second"),
-        "steps_per_second": metrics.get(f"{prefix}_steps_per_second"),
-        "epoch": metrics.get("epoch"),
-        "total_flos": metrics.get("total_flos"),
-        "wall_time_seconds": wall_time_seconds,
+def save_loss_plots(log_history, report_dir: str):
+    train_points = []
+    eval_points = []
+
+    for log in log_history:
+        if "loss" in log:
+            x_value = log.get("step", log.get("epoch", len(train_points) + 1))
+            train_points.append((float(x_value), float(log["loss"])))
+        if "eval_loss" in log:
+            x_value = log.get("step", log.get("epoch", len(eval_points) + 1))
+            eval_points.append((float(x_value), float(log["eval_loss"])))
+
+    paths = {
+        "loss_png": os.path.join(report_dir, "loss_curve.png"),
+        "loss_pdf": os.path.join(report_dir, "loss_curve.pdf"),
     }
-    return {k: to_serializable(v) for k, v in row.items()}
+
+    if not train_points and not eval_points:
+        return {key: None for key in paths}
+
+    plt.figure(figsize=(9, 5))
+    if train_points:
+        x_values, y_values = zip(*train_points)
+        plt.plot(x_values, y_values, marker="o", label="train_loss")
+    if eval_points:
+        x_values, y_values = zip(*eval_points)
+        plt.plot(x_values, y_values, marker="s", label="eval_loss")
+    plt.title("Training Loss")
+    plt.xlabel("Step / Epoch")
+    plt.ylabel("Loss")
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(paths["loss_png"], dpi=200)
+    plt.savefig(paths["loss_pdf"])
+    plt.close()
+    return paths
 
 
-def build_train_metrics_row(train_metrics: dict, wall_time_seconds: float):
-    row = {
-        "stage": "train",
-        "loss": train_metrics.get("train_loss"),
-        "accuracy": train_metrics.get("train_accuracy"),
-        "precision": train_metrics.get("train_precision"),
-        "recall": train_metrics.get("train_recall"),
-        "f1": train_metrics.get("train_f1"),
-        "runtime_seconds": train_metrics.get("train_runtime"),
-        "samples_per_second": train_metrics.get("train_samples_per_second"),
-        "steps_per_second": train_metrics.get("train_steps_per_second"),
-        "epoch": train_metrics.get("epoch"),
-        "total_flos": train_metrics.get("total_flos"),
-        "wall_time_seconds": wall_time_seconds,
+def save_performance_plots(val_metrics: dict, test_metrics: dict, report_dir: str):
+    metric_names = ["accuracy", "precision", "recall", "f1"]
+    x_positions = np.arange(len(metric_names))
+    width = 0.35
+
+    val_scores = [float(val_metrics.get(name, 0.0)) for name in metric_names]
+    test_scores = [float(test_metrics.get(name, 0.0)) for name in metric_names]
+
+    paths = {
+        "performance_png": os.path.join(report_dir, "performance_metrics.png"),
+        "performance_pdf": os.path.join(report_dir, "performance_metrics.pdf"),
     }
-    return {k: to_serializable(v) for k, v in row.items()}
+
+    plt.figure(figsize=(9, 5))
+    plt.bar(x_positions - width / 2, val_scores, width, label="validation")
+    plt.bar(x_positions + width / 2, test_scores, width, label="test")
+    plt.xticks(x_positions, metric_names)
+    plt.ylim(0, 1)
+    plt.ylabel("Score")
+    plt.title("Validation and Test Performance")
+    plt.grid(axis="y", alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(paths["performance_png"], dpi=200)
+    plt.savefig(paths["performance_pdf"])
+    plt.close()
+    return paths
 
 
-def build_model_info(model, tokenizer, config, dataset_sizes):
-    model_config = model.config.to_dict()
-    hidden_size = model_config.get("hidden_size", model_config.get("dim"))
+def cuda_bf16_supported():
+    return bool(torch.cuda.is_available() and torch.cuda.is_bf16_supported())
 
-    info = {
-        "model_name": config["model_name"],
-        "model_type": model_config.get("model_type"),
-        "architectures": model_config.get("architectures"),
-        "num_labels": model_config.get("num_labels"),
-        "hidden_size": hidden_size,
-        "vocab_size": model_config.get("vocab_size"),
-        "max_position_embeddings": model_config.get("max_position_embeddings"),
-        "tokenizer_vocab_size": getattr(tokenizer, "vocab_size", None),
-        "dataset_sizes": dataset_sizes,
+
+def build_training_args(config, output_dir):
+    bf16_default = cuda_bf16_supported()
+    common_args = {
+        "output_dir": output_dir,
+        "per_device_train_batch_size": int(config["batch_size"]),
+        "per_device_eval_batch_size": int(config.get("eval_batch_size", config["batch_size"])),
+        "gradient_accumulation_steps": int(config["gradient_accumulation_steps"]),
+        "learning_rate": float(config["learning_rate"]),
+        "num_train_epochs": float(config["num_train_epochs"]),
+        "max_steps": int(config.get("max_steps", -1)),
+        "warmup_ratio": float(config["warmup_ratio"]),
+        "weight_decay": float(config["weight_decay"]),
+        "optim": config["optimizer"],
+        "lr_scheduler_type": config.get("lr_scheduler_type", "linear"),
+        "logging_steps": int(config["logging_steps"]),
+        "eval_strategy": "epoch",
+        "save_strategy": "epoch",
+        "save_total_limit": int(config.get("save_total_limit", 2)),
+        "report_to": "none",
+        "fp16": bool(config.get("fp16", not bf16_default)),
+        "bf16": bool(config.get("bf16", bf16_default)),
+        "seed": int(config["seed"]),
     }
-    info.update(count_parameters(model))
-    return info
+
+    if SFTConfig is None:
+        return TrainingArguments(**common_args)
+
+    return SFTConfig(
+        **common_args,
+        dataset_text_field="text",
+        max_length=int(config["max_seq_length"]),
+        packing=bool(config.get("packing", False)),
+    )
+
+
+def build_sft_trainer(model, tokenizer, train_dataset, val_dataset, training_args, config):
+    try:
+        return SFTTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=val_dataset,
+            processing_class=tokenizer,
+        )
+    except TypeError:
+        return SFTTrainer(
+            model=model,
+            tokenizer=tokenizer,
+            train_dataset=train_dataset,
+            eval_dataset=val_dataset,
+            dataset_text_field="text",
+            max_seq_length=int(config["max_seq_length"]),
+            args=training_args,
+            packing=bool(config.get("packing", False)),
+        )
 
 
 def main(config_path: str):
     config = load_config(config_path)
     set_seed(int(config["seed"]))
 
-    with open(config["label2id_path"], "r", encoding="utf-8") as f:
-        label2id = json.load(f)
-
-    with open(config["id2label_path"], "r", encoding="utf-8") as f:
-        id2label_raw = json.load(f)
-
-    id2label = {int(k): v for k, v in id2label_raw.items()}
-    num_labels = len(label2id)
+    label2id, id2label = load_label_mappings(config)
+    label_list = build_label_list(id2label)
 
     train_df = load_split(config["train_csv"], "train")
     val_df = load_split(config["val_csv"], "val")
     test_df = load_split(config["test_csv"], "test")
-    dataset_sizes = {
-        "train_samples": int(len(train_df)),
-        "val_samples": int(len(val_df)),
-        "test_samples": int(len(test_df)),
-    }
 
-    tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
+    max_seq_length = int(config["max_seq_length"])
+    dtype = None if config.get("dtype") in (None, "none", "None") else getattr(torch, config["dtype"])
 
-    def tokenize_function(examples):
-        return tokenizer(
-            examples["text"],
-            truncation=True,
-            padding="max_length",
-            max_length=int(config["max_length"]),
-        )
-
-    train_dataset = to_dataset(train_df).map(tokenize_function, batched=True)
-    val_dataset = to_dataset(val_df).map(tokenize_function, batched=True)
-    test_dataset = to_dataset(test_df).map(tokenize_function, batched=True)
-
-    train_dataset = train_dataset.remove_columns(["text"])
-    val_dataset = val_dataset.remove_columns(["text"])
-    test_dataset = test_dataset.remove_columns(["text"])
-
-    train_dataset.set_format("torch")
-    val_dataset.set_format("torch")
-    test_dataset.set_format("torch")
-
-    model = AutoModelForSequenceClassification.from_pretrained(
-        config["model_name"],
-        num_labels=num_labels,
-        label2id=label2id,
-        id2label=id2label,
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=config["model_name"],
+        max_seq_length=max_seq_length,
+        dtype=dtype,
+        load_in_4bit=bool(config.get("load_in_4bit", True)),
     )
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=int(config["lora_r"]),
+        target_modules=config["target_modules"],
+        lora_alpha=int(config["lora_alpha"]),
+        lora_dropout=float(config["lora_dropout"]),
+        bias=config.get("lora_bias", "none"),
+        use_gradient_checkpointing=config.get("use_gradient_checkpointing", "unsloth"),
+        random_state=int(config["seed"]),
+        use_rslora=bool(config.get("use_rslora", False)),
+        loftq_config=None,
+    )
+    model_params = count_parameters(model)
+
+    train_dataset = to_sft_dataset(train_df, label_list)
+    val_dataset = to_sft_dataset(val_df, label_list)
 
     output_dir = ensure_dir(config["output_dir"])
-    report_dir = ensure_dir(config.get("report_dir", os.path.join(output_dir, "train_report")))
+    report_dir = ensure_dir(config.get("report_dir", os.path.dirname(output_dir) or output_dir))
 
-    training_args = TrainingArguments(
-        output_dir=output_dir,
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        logging_strategy="steps",
-        logging_steps=int(config["logging_steps"]),
-        learning_rate=float(config["learning_rate"]),
-        per_device_train_batch_size=int(config["batch_size"]),
-        per_device_eval_batch_size=int(config["batch_size"]),
-        num_train_epochs=float(config["num_train_epochs"]),
-        weight_decay=float(config["weight_decay"]),
-        warmup_ratio=float(config["warmup_ratio"]),
-        optim=config["optimizer"],
-        load_best_model_at_end=True,
-        metric_for_best_model="accuracy",
-        greater_is_better=True,
-        save_total_limit=2,
-        report_to="none",
-        seed=int(config["seed"]),
-    )
-
-    trainer = Trainer(
+    training_args = build_training_args(config, output_dir)
+    trainer = build_sft_trainer(
         model=model,
-        args=training_args,
+        tokenizer=tokenizer,
         train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        processing_class=tokenizer,
-        compute_metrics=compute_metrics,
+        val_dataset=val_dataset,
+        training_args=training_args,
+        config=config,
     )
 
-    run_started_at = datetime.now(timezone.utc)
-    total_start = perf_counter()
-
-    print("===== TRAINING CONFIG =====")
-    print(f"Optimizer: {config['optimizer']}")
-    print(f"Regularization techniques: {config['regularization_techniques']}")
-    print(f"Augmentation techniques: {config['augmentation_techniques']}")
-    print(f"Train report dir: {report_dir}")
-
+    started_at = datetime.now(timezone.utc)
     train_start = perf_counter()
+
+    print("===== UNSLOTH TRAINING CONFIG =====")
+    print(f"Model: {config['model_name']}")
+    print(f"Output dir: {output_dir}")
+    print(f"Report dir: {report_dir}")
+    print(f"Labels: {len(label2id)}")
+    print(f"Train/val/test: {len(train_df)}/{len(val_df)}/{len(test_df)}")
+
     train_result = trainer.train()
     train_wall_time = perf_counter() - train_start
 
-    log_history_path = save_log_history(trainer.state.log_history, report_dir)
-    plot_paths = save_training_plots(trainer.state.log_history, report_dir)
-
-    val_start = perf_counter()
-    val_results = trainer.evaluate(eval_dataset=val_dataset, metric_key_prefix="val")
-    val_wall_time = perf_counter() - val_start
-
-    test_start = perf_counter()
-    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix="test")
-    test_wall_time = perf_counter() - test_start
-
-    total_wall_time = perf_counter() - total_start
-    run_finished_at = datetime.now(timezone.utc)
-
-    metrics_rows = [
-        build_train_metrics_row(train_result.metrics, train_wall_time),
-        build_metrics_row("validation", val_results, "val", val_wall_time),
-        build_metrics_row("test", test_results, "test", test_wall_time),
-    ]
-    metrics_df = pd.DataFrame(metrics_rows)
-    metrics_csv_path = os.path.join(report_dir, "metrics.csv")
-    metrics_df.to_csv(metrics_csv_path, index=False)
-
-    time_summary = {
-        "started_at_utc": run_started_at,
-        "finished_at_utc": run_finished_at,
-        "train_wall_time_seconds": train_wall_time,
-        "validation_wall_time_seconds": val_wall_time,
-        "test_wall_time_seconds": test_wall_time,
-        "total_wall_time_seconds": total_wall_time,
-    }
-
-    train_params = {
-        "config": config,
-        "training_arguments": training_args.to_dict(),
-        "dataset_sizes": dataset_sizes,
-    }
-
-    model_info = build_model_info(model, tokenizer, config, dataset_sizes)
-
-    summary = {
-        "report_dir": report_dir,
-        "output_dir": output_dir,
-        "metrics_csv": metrics_csv_path,
-        "train_log_history_csv": log_history_path,
-        "plots": plot_paths,
-        "time_summary": time_summary,
-        "train_metrics": train_result.metrics,
-        "validation_metrics": val_results,
-        "test_metrics": test_results,
-        "train_params": train_params,
-        "model_info": model_info,
-    }
-
-    trainer.save_model(output_dir)
+    model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
 
-    with open(os.path.join(output_dir, "label2id.json"), "w", encoding="utf-8") as f:
-        json.dump(label2id, f, ensure_ascii=False, indent=2)
+    write_json(os.path.join(output_dir, "label2id.json"), label2id)
+    write_json(os.path.join(output_dir, "id2label.json"), {str(k): v for k, v in id2label.items()})
+    write_json(os.path.join(output_dir, "intent_labels.json"), sorted(label2id))
 
-    with open(os.path.join(output_dir, "id2label.json"), "w", encoding="utf-8") as f:
-        json.dump({str(k): v for k, v in id2label.items()}, f, ensure_ascii=False, indent=2)
+    val_metrics, val_predictions = evaluate_generation(
+        model, tokenizer, val_df, label2id, label_list, config, "validation"
+    )
+    test_metrics, test_predictions = evaluate_generation(
+        model, tokenizer, test_df, label2id, label_list, config, "test"
+    )
 
-    write_json(os.path.join(report_dir, "time_summary.json"), time_summary)
-    write_json(os.path.join(report_dir, "train_params.json"), train_params)
-    write_json(os.path.join(report_dir, "model_params.json"), model_info)
+    finished_at = datetime.now(timezone.utc)
+    log_history_path = save_log_history(trainer.state.log_history, report_dir)
+    loss_plot_paths = save_loss_plots(trainer.state.log_history, report_dir)
+    performance_plot_paths = save_performance_plots(val_metrics, test_metrics, report_dir)
+
+    metrics_df = pd.DataFrame(
+        [
+            {
+                "split": "train",
+                "loss": train_result.metrics.get("train_loss"),
+                "runtime_seconds": train_result.metrics.get("train_runtime"),
+                "samples_per_second": train_result.metrics.get("train_samples_per_second"),
+                "wall_time_seconds": train_wall_time,
+            },
+            val_metrics,
+            test_metrics,
+        ]
+    )
+    metrics_csv_path = os.path.join(report_dir, "metrics.csv")
+    metrics_json_path = os.path.join(report_dir, "metrics.json")
+    metrics_df.to_csv(metrics_csv_path, index=False)
+    write_json(
+        metrics_json_path,
+        {
+            "train": train_result.metrics,
+            "validation": val_metrics,
+            "test": test_metrics,
+        },
+    )
+    val_predictions_path = os.path.join(report_dir, "val_predictions.csv")
+    test_predictions_path = os.path.join(report_dir, "test_predictions.csv")
+    train_config_path = os.path.join(report_dir, "train_config.json")
+    model_params_path = os.path.join(report_dir, "model_params.json")
+    val_predictions.to_csv(val_predictions_path, index=False)
+    test_predictions.to_csv(test_predictions_path, index=False)
+    write_json(train_config_path, config)
+    write_json(
+        model_params_path,
+        {
+            "model_name": config["model_name"],
+            "max_seq_length": config["max_seq_length"],
+            "load_in_4bit": config.get("load_in_4bit", True),
+            "lora_r": config["lora_r"],
+            "lora_alpha": config["lora_alpha"],
+            "lora_dropout": config["lora_dropout"],
+            "target_modules": config["target_modules"],
+            **model_params,
+        },
+    )
+
+    summary = {
+        "started_at_utc": started_at,
+        "finished_at_utc": finished_at,
+        "output_dir": output_dir,
+        "report_dir": report_dir,
+        "metrics_csv": metrics_csv_path,
+        "metrics_json": metrics_json_path,
+        "train_log_history_csv": log_history_path,
+        "val_predictions_csv": val_predictions_path,
+        "test_predictions_csv": test_predictions_path,
+        "train_config_json": train_config_path,
+        "model_params_json": model_params_path,
+        "plots": {
+            **loss_plot_paths,
+            **performance_plot_paths,
+        },
+        "train_metrics": train_result.metrics,
+        "validation_metrics": val_metrics,
+        "test_metrics": test_metrics,
+        "model_params": model_params,
+        "config": config,
+    }
     write_json(os.path.join(report_dir, "summary.json"), summary)
 
     print("===== VALIDATION RESULTS =====")
-    for key, value in val_results.items():
+    for key, value in val_metrics.items():
         print(f"{key}: {value}")
 
     print("===== TEST RESULTS =====")
-    for key, value in test_results.items():
+    for key, value in test_metrics.items():
         print(f"{key}: {value}")
 
-    print(f"Model checkpoint and tokenizer saved to: {output_dir}")
-    print(f"Training metrics saved to: {metrics_csv_path}")
-    print(f"Training log history saved to: {log_history_path}")
-    if plot_paths["line_loss"]:
-        print(f"Loss curve saved to: {plot_paths['line_loss']}")
-    if plot_paths["line_performance"]:
-        print(f"Performance curve saved to: {plot_paths['line_performance']}")
+    print(f"LoRA checkpoint and tokenizer saved to: {output_dir}")
+    print(f"Training report saved to: {report_dir}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     args = parser.parse_args()
-
     main(args.config)

@@ -1,9 +1,14 @@
+unsloth
+unsloth_zoo
 torch
 transformers
+trl
+peft
+accelerate
+bitsandbytes
 datasets
 scikit-learn
 pandas
 pyyaml
-accelerate
 numpy
 matplotlib

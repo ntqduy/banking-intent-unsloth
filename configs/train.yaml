@@ -1,25 +1,54 @@
-model_name: distilbert-base-uncased
+model_name: unsloth/Qwen2.5-0.5B-Instruct-bnb-4bit
 
 train_csv: sample_data/clean_data/train.csv
 val_csv: sample_data/clean_data/val.csv
 test_csv: sample_data/clean_data/test.csv
 
-label2id_path: outputs/label2id.json
-id2label_path: outputs/id2label.json
+label2id_path: outputs/outputs_train/analysis_data/label2id.json
+id2label_path: outputs/outputs_train/analysis_data/id2label.json
 
-output_dir: outputs/model_checkpoint
-report_dir: outputs/train_report
+output_dir: outputs/outputs_train/model_checkpoint
+report_dir: outputs/outputs_train
 
-max_length: 64
-batch_size: 16
-learning_rate: 2.0e-5
-optimizer: adamw_torch
+max_seq_length: 512
+max_new_tokens: 12
+batch_size: 2
+eval_batch_size: 4
+gradient_accumulation_steps: 8
+learning_rate: 2.0e-4
+optimizer: adamw_8bit
+lr_scheduler_type: linear
 num_train_epochs: 3
+max_steps: -1
 weight_decay: 0.01
 warmup_ratio: 0.1
+logging_steps: 10
+save_total_limit: 2
+seed: 42
+
+load_in_4bit: true
+dtype: none
+fp16: true
+bf16: false
+packing: false
+
+lora_r: 16
+lora_alpha: 16
+lora_dropout: 0.0
+lora_bias: none
+use_gradient_checkpointing: unsloth
+use_rslora: false
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
 regularization_techniques:
   - weight_decay
+  - lora_dropout_0
 augmentation_techniques:
   - none
-logging_steps: 10
-seed: 42

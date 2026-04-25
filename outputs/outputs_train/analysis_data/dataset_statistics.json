@@ -1,0 +1,41 @@
+{
+  "raw": {
+    "train_samples": 10003,
+    "test_samples": 3080,
+    "total_samples": 13083
+  },
+  "clean": {
+    "train_samples": 2767,
+    "val_samples": 308,
+    "test_samples": 3080,
+    "total_samples": 6155,
+    "samples_per_label": 40,
+    "train_csv": "sample_data/clean_data\\train.csv",
+    "val_csv": "sample_data/clean_data\\val.csv",
+    "test_csv": "sample_data/clean_data\\test.csv",
+    "test_source": "sample_data/original/test.csv"
+  },
+  "num_labels": 77,
+  "category_summary": {
+    "train": {
+      "min": 31,
+      "max": 36,
+      "avg": 35.94
+    },
+    "val": {
+      "min": 4,
+      "max": 4,
+      "avg": 4.0
+    },
+    "test": {
+      "min": 40,
+      "max": 40,
+      "avg": 40.0
+    },
+    "total": {
+      "min": 75,
+      "max": 80,
+      "avg": 79.94
+    }
+  }
+}
