@@ -84,6 +84,16 @@ def compute_classification_metrics(labels, preds):
     }
 
 
+def count_model_parameters(model):
+    return int(sum(param.numel() for param in model.parameters()))
+
+
+def estimate_inference_flops(num_parameters: int, token_count: int):
+    if num_parameters <= 0 or token_count <= 0:
+        return None
+    return float(2 * num_parameters * token_count)
+
+
 def build_label_list(id2label: dict) -> str:
     return ", ".join(id2label[idx] for idx in sorted(id2label))
 
@@ -179,6 +189,7 @@ def predict_batch(classifier, messages):
     ).to(next(classifier.model.parameters()).device)
 
     prompt_lengths = inputs["input_ids"].shape[1]
+    input_token_count = int(inputs["attention_mask"].sum().item())
     with torch.inference_mode():
         output_ids = classifier.model.generate(
             **inputs,
@@ -192,13 +203,22 @@ def predict_batch(classifier, messages):
     labels = [normalize_generated_label(text, classifier.label2id) for text in generated_texts]
     elapsed_seconds = perf_counter() - started
     generated_token_count = int(generated_ids.numel())
+    processed_token_count = input_token_count + generated_token_count
+    estimated_flops = estimate_inference_flops(
+        classifier.total_parameters,
+        processed_token_count,
+    )
 
     return {
         "predicted_ids": [classifier.label2id.get(label, -1) for label in labels],
         "predicted_labels": labels,
         "raw_generations": generated_texts,
         "elapsed_seconds": elapsed_seconds,
+        "input_token_count": input_token_count,
         "generated_token_count": generated_token_count,
+        "processed_token_count": processed_token_count,
+        "estimated_flops": estimated_flops,
+        "estimated_tflops": (estimated_flops / 1e12) if estimated_flops is not None else None,
         "generated_tokens_per_second": (generated_token_count / elapsed_seconds) if elapsed_seconds > 0 else None,
     }
 
@@ -231,6 +251,7 @@ class IntentClassification:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "left"
         FastLanguageModel.for_inference(self.model)
+        self.total_parameters = count_model_parameters(self.model)
 
     def __call__(self, message):
         result = predict_batch(self, [message])
@@ -247,7 +268,10 @@ def evaluate_and_save_report(classifier, eval_df, report_dir: str, config: dict)
     predicted_labels = []
     raw_generations = []
     total_runtime_seconds = 0.0
+    total_input_tokens = 0
     total_generated_tokens = 0
+    total_processed_tokens = 0
+    total_estimated_flops = 0.0
     started_at = datetime.now(timezone.utc)
 
     for start_idx in range(0, len(eval_df), batch_size):
@@ -257,7 +281,10 @@ def evaluate_and_save_report(classifier, eval_df, report_dir: str, config: dict)
         predicted_labels.extend(batch_result["predicted_labels"])
         raw_generations.extend(batch_result["raw_generations"])
         total_runtime_seconds += batch_result["elapsed_seconds"]
+        total_input_tokens += int(batch_result["input_token_count"])
         total_generated_tokens += int(batch_result["generated_token_count"])
+        total_processed_tokens += int(batch_result["processed_token_count"])
+        total_estimated_flops += float(batch_result["estimated_flops"] or 0.0)
 
     finished_at = datetime.now(timezone.utc)
     predictions_df = pd.DataFrame(
@@ -287,10 +314,20 @@ def evaluate_and_save_report(classifier, eval_df, report_dir: str, config: dict)
         "precision": metrics["precision"],
         "recall": metrics["recall"],
         "f1": metrics["f1"],
+        "inference_time_seconds": total_runtime_seconds,
         "total_runtime_seconds": total_runtime_seconds,
+        "average_inference_time_ms_per_sample": (total_runtime_seconds / num_samples * 1000.0) if num_samples else None,
         "average_latency_ms_per_sample": (total_runtime_seconds / num_samples * 1000.0) if num_samples else None,
+        "fps": (num_samples / total_runtime_seconds) if total_runtime_seconds > 0 else None,
         "throughput_samples_per_second": (num_samples / total_runtime_seconds) if total_runtime_seconds > 0 else None,
+        "model_parameter_count": classifier.total_parameters,
+        "input_token_count": total_input_tokens,
         "generated_token_count": total_generated_tokens,
+        "processed_token_count": total_processed_tokens,
+        "estimated_flops": total_estimated_flops,
+        "estimated_tflops": total_estimated_flops / 1e12,
+        "estimated_flops_per_second": (total_estimated_flops / total_runtime_seconds) if total_runtime_seconds > 0 else None,
+        "estimated_tflops_per_second": (total_estimated_flops / total_runtime_seconds / 1e12) if total_runtime_seconds > 0 else None,
         "generated_tokens_per_second": (total_generated_tokens / total_runtime_seconds) if total_runtime_seconds > 0 else None,
         "started_at_utc": started_at,
         "finished_at_utc": finished_at,
@@ -340,8 +377,13 @@ def save_single_prediction(classifier, message: str, prediction_result: dict, re
         "predicted_id": prediction_result["predicted_ids"][0],
         "predicted_label": prediction_result["predicted_labels"][0],
         "raw_generation": prediction_result["raw_generations"][0],
+        "inference_time_seconds": prediction_result["elapsed_seconds"],
         "elapsed_seconds": prediction_result["elapsed_seconds"],
+        "input_token_count": prediction_result["input_token_count"],
         "generated_token_count": prediction_result["generated_token_count"],
+        "processed_token_count": prediction_result["processed_token_count"],
+        "estimated_flops": prediction_result["estimated_flops"],
+        "estimated_tflops": prediction_result["estimated_tflops"],
         "generated_tokens_per_second": prediction_result["generated_tokens_per_second"],
         "created_at_utc": datetime.now(timezone.utc),
     }

@@ -112,25 +112,6 @@ Or run the full pipeline:
 ```bash
 bash train.sh
 ```
-
-Saved artifacts:
-
-- `outputs/outputs_train/model_checkpoint/` LoRA checkpoint and tokenizer
-- `outputs/outputs_train/model_checkpoint/label2id.json`
-- `outputs/outputs_train/model_checkpoint/id2label.json`
-- `outputs/outputs_train/metrics.csv`
-- `outputs/outputs_train/metrics.json`
-- `outputs/outputs_train/train_log_history.csv`
-- `outputs/outputs_train/loss_curve.png`
-- `outputs/outputs_train/loss_curve.pdf`
-- `outputs/outputs_train/performance_metrics.png`
-- `outputs/outputs_train/performance_metrics.pdf`
-- `outputs/outputs_train/val_predictions.csv`
-- `outputs/outputs_train/test_predictions.csv`
-- `outputs/outputs_train/train_config.json`
-- `outputs/outputs_train/model_params.json`
-- `outputs/outputs_train/summary.json`
-
 ## Inference
 
 The required grading interface is implemented in `scripts/inference.py`:
@@ -167,14 +148,77 @@ Shell helper:
 bash inference.sh finetuned "my card has not arrived yet"
 bash inference.sh base "my card has not arrived yet"
 ```
+## Metrics
 
-Inference reports are saved to:
+The training and inference reports save the following metrics to `metrics.csv`, `metrics.json`, or `summary.json`.
 
-- Fine-tuned: `outputs/outputs_inf_finetune/`
-- Base: `outputs/outputs_inf_base/`
-- Each inference report contains `metrics.csv`, `predictions.csv`, `correct_samples.csv`, `wrong_samples.csv`, `sample_predictions.csv`, and `summary.json`.
-- Metrics include accuracy, precision, recall, F1, latency, throughput in samples/second, and generated tokens/second.
-- Single-message inference is saved to `single_prediction.json`.
+Classification metrics:
+
+- Accuracy:
+
+```text
+Accuracy = number of correct predictions / total number of samples
+```
+
+- Precision, recall, and F1 are computed with weighted averaging across intent labels:
+
+```text
+Precision_c = TP_c / (TP_c + FP_c)
+Recall_c = TP_c / (TP_c + FN_c)
+F1_c = 2 * Precision_c * Recall_c / (Precision_c + Recall_c)
+
+Weighted Precision = sum_c support_c * Precision_c / sum_c support_c
+Weighted Recall    = sum_c support_c * Recall_c / sum_c support_c
+Weighted F1        = sum_c support_c * F1_c / sum_c support_c
+```
+
+Inference speed metrics:
+
+- Inference time:
+
+```text
+Inference time = finish_time - start_time
+```
+
+- Average inference time per sample:
+
+```text
+Average inference time per sample = total inference time / number of samples
+```
+
+- FPS, also reported as throughput in samples/second:
+
+```text
+FPS = number of samples / total inference time
+```
+
+- Generated tokens per second:
+
+```text
+Generated tokens per second = number of generated tokens / total inference time
+```
+
+Computational cost metrics:
+
+- Processed token count:
+
+```text
+Processed tokens = input tokens + generated tokens
+```
+
+- Estimated FLOPs:
+
+```text
+Estimated FLOPs = 2 * number of model parameters * processed tokens
+```
+
+- Estimated FLOPs per second:
+
+```text
+Estimated FLOPs/s = estimated FLOPs / total inference time
+```
+
+The FLOPs value is an approximation for decoder-only LLM inference. It is useful for comparing runs in this project, but it is not a hardware-profiler measurement.
 
 ## Result Table
 

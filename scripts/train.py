@@ -146,6 +146,12 @@ def compute_metrics(labels, preds):
     }
 
 
+def estimate_inference_flops(num_parameters: int, token_count: int):
+    if num_parameters <= 0 or token_count <= 0:
+        return None
+    return float(2 * num_parameters * token_count)
+
+
 def predict_labels(model, tokenizer, df: pd.DataFrame, label2id: dict, label_list: str, config: dict):
     FastLanguageModel.for_inference(model)
     device = next(model.parameters()).device
@@ -154,6 +160,8 @@ def predict_labels(model, tokenizer, df: pd.DataFrame, label2id: dict, label_lis
     batch_size = int(config.get("eval_batch_size", config["batch_size"]))
 
     predicted_labels = []
+    total_input_tokens = 0
+    total_generated_tokens = 0
     started = perf_counter()
 
     for start_idx in range(0, len(df), batch_size):
@@ -168,6 +176,7 @@ def predict_labels(model, tokenizer, df: pd.DataFrame, label2id: dict, label_lis
         ).to(device)
 
         prompt_lengths = inputs["input_ids"].shape[1]
+        total_input_tokens += int(inputs["attention_mask"].sum().item())
         with torch.inference_mode():
             output_ids = model.generate(
                 **inputs,
@@ -177,6 +186,7 @@ def predict_labels(model, tokenizer, df: pd.DataFrame, label2id: dict, label_lis
             )
 
         generated_ids = output_ids[:, prompt_lengths:]
+        total_generated_tokens += int(generated_ids.numel())
         generated_texts = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
         predicted_labels.extend(
             normalize_generated_label(text, label2id) for text in generated_texts
@@ -184,11 +194,18 @@ def predict_labels(model, tokenizer, df: pd.DataFrame, label2id: dict, label_lis
 
     elapsed = perf_counter() - started
     predicted_ids = [label2id.get(label, -1) for label in predicted_labels]
-    return predicted_labels, predicted_ids, elapsed
+    return {
+        "predicted_labels": predicted_labels,
+        "predicted_ids": predicted_ids,
+        "elapsed_seconds": elapsed,
+        "input_token_count": total_input_tokens,
+        "generated_token_count": total_generated_tokens,
+        "processed_token_count": total_input_tokens + total_generated_tokens,
+    }
 
 
 def evaluate_generation(model, tokenizer, df, label2id, label_list, config, split_name):
-    predicted_labels, predicted_ids, elapsed = predict_labels(
+    prediction_result = predict_labels(
         model=model,
         tokenizer=tokenizer,
         df=df,
@@ -196,14 +213,33 @@ def evaluate_generation(model, tokenizer, df, label2id, label_list, config, spli
         label_list=label_list,
         config=config,
     )
+    predicted_labels = prediction_result["predicted_labels"]
+    predicted_ids = prediction_result["predicted_ids"]
+    elapsed = prediction_result["elapsed_seconds"]
+    total_parameters = count_parameters(model)["total_parameters"]
+    estimated_flops = estimate_inference_flops(
+        total_parameters,
+        prediction_result["processed_token_count"],
+    )
     true_ids = df["label"].tolist()
     metrics = compute_metrics(true_ids, predicted_ids)
     metrics.update(
         {
             "split": split_name,
             "num_samples": int(len(df)),
+            "inference_time_seconds": float(elapsed),
             "runtime_seconds": float(elapsed),
+            "average_inference_time_ms_per_sample": float(elapsed / len(df) * 1000.0) if len(df) else None,
+            "fps": float(len(df) / elapsed) if elapsed > 0 else None,
             "samples_per_second": float(len(df) / elapsed) if elapsed > 0 else None,
+            "model_parameter_count": total_parameters,
+            "input_token_count": prediction_result["input_token_count"],
+            "generated_token_count": prediction_result["generated_token_count"],
+            "processed_token_count": prediction_result["processed_token_count"],
+            "estimated_flops": estimated_flops,
+            "estimated_tflops": (estimated_flops / 1e12) if estimated_flops is not None else None,
+            "estimated_flops_per_second": (estimated_flops / elapsed) if estimated_flops is not None and elapsed > 0 else None,
+            "estimated_tflops_per_second": (estimated_flops / elapsed / 1e12) if estimated_flops is not None and elapsed > 0 else None,
         }
     )
     predictions = pd.DataFrame(
