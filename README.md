@@ -1,6 +1,6 @@
 # BANKING77 Intent Detection with Unsloth
 
-This project fine-tunes an intent detection model on a sampled subset of BANKING77 using Unsloth LoRA/QLoRA. The model is trained as an instruction-style classifier: given a banking customer message and the allowed intent labels, it generates exactly one intent label.
+This project fine-tunes an intent detection model on BANKING77 using Unsloth LoRA/QLoRA. The model is trained as an instruction-style classifier: given a banking customer message and the allowed intent labels, it generates exactly one intent label.
 
 ## Project Structure
 
@@ -10,6 +10,7 @@ banking-intent-unsloth/
 |   |-- preprocess_data.py
 |   |-- train.py
 |   |-- inference.py
+|   |-- evaluate.py
 |-- configs/
 |   |-- train.yaml
 |   |-- inference.yaml
@@ -30,6 +31,7 @@ banking-intent-unsloth/
 |   |-- outputs_inf_base/
 |-- train.sh
 |-- inference.sh
+|-- evaluate.sh
 |-- requirements.txt
 |-- README.md
 ```
@@ -48,7 +50,7 @@ On Windows, use WSL2 or run the notebook/script on Colab/Kaggle if Unsloth or `b
 
 ## Data Preparation
 
-The dataset is BANKING77. By default, preprocessing samples at most 40 examples per intent label so training can finish on limited GPU resources.
+The dataset is BANKING77. By default, preprocessing keeps the full original training split and creates a stratified train/validation split.
 
 ```bash
 python scripts/preprocess_data.py
@@ -57,8 +59,8 @@ python scripts/preprocess_data.py
 Useful options:
 
 ```bash
-python scripts/preprocess_data.py --samples_per_label 40 --val_size 0.1 --seed 42
 python scripts/preprocess_data.py --samples_per_label 0
+python scripts/preprocess_data.py --samples_per_label 40 --val_size 0.1 --seed 42
 ```
 
 Original raw files are kept in `sample_data/original` and are not rewritten when cached files already exist. Model-ready data is saved only under `sample_data/clean_data`.
@@ -73,7 +75,7 @@ Generated model data:
 - `outputs/outputs_train/analysis_data/dataset_statistics.json`
 - `outputs/outputs_train/analysis_data/category_statistics.csv`
 
-Preprocessing includes lowercasing, whitespace cleanup, label mapping, optional per-label sampling from the original train split, and stratified train/validation splitting. The test split is the original BANKING77 test split after the same text normalization.
+Preprocessing includes lowercasing, whitespace cleanup, label mapping, optional per-label sampling from the original train split, and stratified train/validation splitting. The test split is the original BANKING77 test split after the same text normalization. Use `--samples_per_label 0` to train on all available original train samples.
 
 ## Fine-Tuning with Unsloth
 
@@ -81,7 +83,22 @@ Training configuration is in `configs/train.yaml`.
 
 Default model:
 
-- `unsloth/Qwen2.5-0.5B-Instruct-bnb-4bit`
+- `unsloth/Qwen2.5-7B`
+
+Sample count from `sample_data/original` and the default preprocessing configuration:
+
+| Split | Number of samples | Note |
+|---|---:|---|
+| Original train | 10,003 | Raw BANKING77 train samples from `sample_data/original/train.csv` |
+| Original test | 3,080 | Raw BANKING77 test samples from `sample_data/original/test.csv` |
+| Original total | 13,083 | Original train + original test |
+| Number of intent labels | 77 | From `sample_data/original/categories.json` |
+| Train source after preprocessing | 10,003 | Full original train split because `samples_per_label=0` |
+| Fine-tuning train split | 9,002 | 90% of the original train source after stratified split |
+| Validation split | 1,001 | 10% of the original train source after stratified split |
+| Test split | 3,080 | Original BANKING77 test split, used only for final evaluation |
+
+Only the `9,002` fine-tuning train samples are used to update the LoRA weights. The validation split is used for evaluation during training, and the original test split is kept for final reporting.
 
 Main hyperparameters:
 
@@ -112,6 +129,7 @@ Or run the full pipeline:
 ```bash
 bash train.sh
 ```
+
 ## Inference
 
 The required grading interface is implemented in `scripts/inference.py`:
@@ -130,16 +148,10 @@ Run a single example:
 python scripts/inference.py --config configs/inference.yaml --message "my card has not arrived yet"
 ```
 
-Run test-set evaluation:
+Run a single example with the base model:
 
 ```bash
-python scripts/inference.py --config configs/inference.yaml
-```
-
-Evaluate the base model before fine-tuning:
-
-```bash
-python scripts/inference.py --config configs/inference_base.yaml
+python scripts/inference.py --config configs/inference_base.yaml --message "my card has not arrived yet"
 ```
 
 Shell helper:
@@ -148,6 +160,51 @@ Shell helper:
 bash inference.sh finetuned "my card has not arrived yet"
 bash inference.sh base "my card has not arrived yet"
 ```
+
+## Evaluation
+
+Use `scripts/evaluate.py` when you want to evaluate a model on a CSV split and save the full report without running single-message inference.
+
+Evaluate the fine-tuned LoRA checkpoint:
+
+```bash
+python scripts/evaluate.py --config configs/inference.yaml
+```
+
+Evaluate the base Qwen2.5-7B model:
+
+```bash
+python scripts/evaluate.py --config configs/inference_base.yaml
+```
+
+Shell helper:
+
+```bash
+bash evaluate.sh finetuned
+bash evaluate.sh base
+```
+
+Optional arguments:
+
+```bash
+python scripts/evaluate.py \
+  --config configs/inference.yaml \
+  --eval_csv sample_data/clean_data/test.csv \
+  --report_dir outputs/outputs_eval_custom \
+  --batch_size 4
+```
+
+Evaluation outputs are saved to the configured `report_dir`. The default fine-tuned report directory is `outputs/outputs_inf_finetune/`, and the default base-model report directory is `outputs/outputs_inf_base/`.
+
+Each evaluation report contains:
+
+- `metrics.csv`
+- `predictions.csv`
+- `correct_samples.csv`
+- `wrong_samples.csv`
+- `sample_predictions.csv`
+- `summary.json`
+
 ## Metrics
 
 The training and inference reports save the following metrics to `metrics.csv`, `metrics.json`, or `summary.json`.
@@ -224,10 +281,10 @@ The FLOPs value is an approximation for decoder-only LLM inference. It is useful
 
 Fill this table after running training and inference:
 
-| Model | Accuracy | Precision | Recall | F1 |
-|---|---:|---:|---:|---:|
-| Base Qwen2.5-0.5B-Instruct | ... | ... | ... | ... |
-| Fine-tuned Unsloth LoRA model | ... | ... | ... | ... |
+| Model | Accuracy | Precision | Recall | F1 | Inference Time | Estimated FLOPs |
+|---|---:|---:|---:|---:|---:|---:|
+| Base Qwen2.5-7B | ... | ... | ... | ... | ... | ... |
+| Fine-tuned Unsloth LoRA model | ... | ... | ... | ... | ... | ... |
 
 ## Video Demonstration
 

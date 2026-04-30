@@ -311,7 +311,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--samples_per_label",
         type=int,
-        default=40,
+        default=0,
         help="Sample at most this many examples per intent label. Use 0 to keep the full dataset.",
     )
     parser.add_argument("--seed", type=int, default=42)

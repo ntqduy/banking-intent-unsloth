@@ -1,4 +1,4 @@
-model_name: unsloth/Qwen2.5-0.5B-Instruct-bnb-4bit
+model_name: unsloth/Qwen2.5-7B
 
 train_csv: sample_data/clean_data/train.csv
 val_csv: sample_data/clean_data/val.csv

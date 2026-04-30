@@ -1,5 +1,4 @@
 model_name_or_path: outputs/outputs_train/model_checkpoint
-finetuned_model_name_or_path: outputs/outputs_train/model_checkpoint
 id2label_path: outputs/outputs_train/model_checkpoint/id2label.json
 label2id_path: outputs/outputs_train/model_checkpoint/label2id.json
 max_seq_length: 512

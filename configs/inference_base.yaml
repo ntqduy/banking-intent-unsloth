@@ -1,4 +1,4 @@
-model_name_or_path: unsloth/Qwen2.5-0.5B-Instruct-bnb-4bit
+model_name_or_path: unsloth/Qwen2.5-7B
 id2label_path: outputs/outputs_train/analysis_data/id2label.json
 label2id_path: outputs/outputs_train/analysis_data/label2id.json
 max_seq_length: 512

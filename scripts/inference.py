@@ -195,6 +195,9 @@ def predict_batch(classifier, messages):
             **inputs,
             max_new_tokens=classifier.max_new_tokens,
             do_sample=False,
+            temperature=None,
+            top_p=None,
+            top_k=None,
             pad_token_id=classifier.tokenizer.eos_token_id,
         )
 
@@ -424,7 +427,7 @@ def main():
         prediction_path = save_single_prediction(classifier, args.message, prediction_result, report_dir)
         print("Single prediction saved to:", prediction_path)
 
-    if eval_csv:
+    elif eval_csv:
         report_dir = ensure_dir(config.get("report_dir", "outputs/outputs_inf_finetune"))
         eval_df = load_eval_split(eval_csv, classifier.id2label)
         summary, correct_samples_df, wrong_samples_df = evaluate_and_save_report(
