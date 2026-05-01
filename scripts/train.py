@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import re
+import sys
 import warnings
 from datetime import datetime, timezone
 from time import perf_counter
@@ -307,6 +308,101 @@ def save_log_history(log_history, report_dir: str):
     return history_path
 
 
+class Tee:
+    def __init__(self, *streams, skip_tokens=None):
+        self.streams = streams
+        self.skip_tokens = skip_tokens or []
+        self._buffer = ""
+
+    def _should_skip(self, line: str) -> bool:
+        return any(token in line for token in self.skip_tokens)
+
+    def write(self, data):
+        self._buffer += data
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            line_with_newline = f"{line}\n"
+            for stream in self.streams:
+                if stream is self.streams[1] and self._should_skip(line):
+                    continue
+                stream.write(line_with_newline)
+                stream.flush()
+
+    def flush(self):
+        if self._buffer:
+            for stream in self.streams:
+                if stream is self.streams[1] and self._should_skip(self._buffer):
+                    continue
+                stream.write(self._buffer)
+                stream.flush()
+            self._buffer = ""
+        for stream in self.streams:
+            stream.flush()
+
+
+def write_train_logs(
+    log_history: list,
+    report_dir: str,
+    config: dict,
+    train_result,
+    train_wall_time: float,
+    started_at,
+    finished_at,
+):
+    log_path = os.path.join(report_dir, "train_logs.txt")
+    lines = [
+        "===== UNSLOTH TRAINING CONFIG =====",
+        f"Model: {config.get('model_name')}",
+        f"Epochs: {config.get('num_train_epochs')}",
+        f"Batch size: {config.get('batch_size')}",
+        f"Gradient accumulation steps: {config.get('gradient_accumulation_steps')}",
+        f"Learning rate: {config.get('learning_rate')}",
+        f"Max sequence length: {config.get('max_seq_length')}",
+        f"Load in 4bit: {config.get('load_in_4bit', True)}",
+        f"Started at (UTC): {started_at}",
+        f"Finished at (UTC): {finished_at}",
+        "",
+        "===== TRAIN LOG HISTORY =====",
+    ]
+
+    for log in log_history or []:
+        step = log.get("step")
+        epoch = log.get("epoch")
+        loss = log.get("loss")
+        eval_loss = log.get("eval_loss")
+        lr = log.get("learning_rate")
+        samples_per_second = log.get("samples_per_second")
+        parts = []
+        if step is not None:
+            parts.append(f"step={step}")
+        if epoch is not None:
+            parts.append(f"epoch={epoch}")
+        if loss is not None:
+            parts.append(f"loss={loss}")
+        if eval_loss is not None:
+            parts.append(f"eval_loss={eval_loss}")
+        if lr is not None:
+            parts.append(f"lr={lr}")
+        if samples_per_second is not None:
+            parts.append(f"samples_per_second={samples_per_second}")
+        if parts:
+            lines.append(" | ".join(parts))
+
+    lines.extend(
+        [
+            "",
+            "===== TRAIN RESULT =====",
+            f"Train loss: {train_result.metrics.get('train_loss')}",
+            f"Train runtime seconds: {train_result.metrics.get('train_runtime')}",
+            f"Train samples per second: {train_result.metrics.get('train_samples_per_second')}",
+            f"Wall time seconds: {train_wall_time}",
+        ]
+    )
+
+    write_text(log_path, "\n".join(lines))
+    return log_path
+
+
 def count_parameters(model):
     total = sum(param.numel() for param in model.parameters())
     trainable = sum(param.numel() for param in model.parameters() if param.requires_grad)
@@ -483,186 +579,221 @@ def build_sft_trainer(model, tokenizer, train_dataset, val_dataset, training_arg
 
 def main(config_path: str):
     config = load_config(config_path)
-    
-    # Set CUDA device if specified in config
-    device_id = config.get("device")
-    if device_id is not None and torch.cuda.is_available():
-        torch.cuda.set_device(int(device_id))
-        print(f"[TRAIN] Using GPU device: {device_id}")
-    else:
-        print("[TRAIN] Using default GPU device")
-    
-    set_seed(int(config["seed"]))
-
-    label2id, id2label = load_label_mappings(config)
-    label_list = build_label_list(id2label)
-
-    train_df = load_split(config["train_csv"], "train")
-    val_df = load_split(config["val_csv"], "val")
-    test_df = load_split(config["test_csv"], "test")
-
-    max_seq_length = int(config["max_seq_length"])
-    dtype = None if config.get("dtype") in (None, "none", "None") else getattr(torch, config["dtype"])
-
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=config["model_name"],
-        max_seq_length=max_seq_length,
-        dtype=dtype,
-        load_in_4bit=bool(config.get("load_in_4bit", True)),
-    )
-
-    model = normalize_model_configs(model)
-    tokenizer = configure_tokenizer_for_causal_lm(tokenizer)
-
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=int(config["lora_r"]),
-        target_modules=config["target_modules"],
-        lora_alpha=int(config["lora_alpha"]),
-        lora_dropout=float(config["lora_dropout"]),
-        bias=config.get("lora_bias", "none"),
-        use_gradient_checkpointing=config.get("use_gradient_checkpointing", True),
-        random_state=int(config["seed"]),
-        use_rslora=bool(config.get("use_rslora", False)),
-        loftq_config=None,
-    )
-    model_params = count_parameters(model)
-
-    train_dataset = to_sft_dataset(train_df, label_list)
-    val_dataset = to_sft_dataset(val_df, label_list)
 
     output_dir = ensure_dir(config["output_dir"])
-    final_model_dir = ensure_dir(config.get("final_model_dir", output_dir))
     report_dir = ensure_dir(config.get("report_dir", os.path.dirname(output_dir) or output_dir))
+    train_terminal_log_path = os.path.join(report_dir, "train_terminal.log")
+    terminal_log_file = open(train_terminal_log_path, "w", encoding="utf-8")
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    skip_tokens = [
+        "[TRAIN] Using GPU device",
+        "Unsloth 2026",
+        "Fast Qwen2 patching",
+        "NVIDIA",
+        "Max memory",
+        "Torch:",
+        "CUDA:",
+        "CUDA Toolkit:",
+        "Triton:",
+        "Bfloat16",
+        "Free license",
+    ]
+    sys.stdout = Tee(sys.stdout, terminal_log_file, skip_tokens=skip_tokens)
+    sys.stderr = Tee(sys.stderr, terminal_log_file, skip_tokens=skip_tokens)
+    
+    try:
+        # Set CUDA device if specified in config
+        device_id = config.get("device")
+        if device_id is not None and torch.cuda.is_available():
+            torch.cuda.set_device(int(device_id))
+            print(f"[TRAIN] Using GPU device: {device_id}")
+        else:
+            print("[TRAIN] Using default GPU device")
 
-    training_args = build_training_args(config, output_dir)
-    trainer = build_sft_trainer(
-        model=model,
-        tokenizer=tokenizer,
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        training_args=training_args,
-        config=config,
-    )
+        set_seed(int(config["seed"]))
 
-    started_at = datetime.now(timezone.utc)
-    train_start = perf_counter()
+        label2id, id2label = load_label_mappings(config)
+        label_list = build_label_list(id2label)
 
-    print("===== UNSLOTH TRAINING CONFIG =====")
-    print(f"Model: {config['model_name']}")
-    print(f"Output dir: {output_dir}")
-    print(f"Report dir: {report_dir}")
-    print(f"Labels: {len(label2id)}")
-    print(f"Train/val/test: {len(train_df)}/{len(val_df)}/{len(test_df)}")
+        train_df = load_split(config["train_csv"], "train")
+        val_df = load_split(config["val_csv"], "val")
+        test_df = load_split(config["test_csv"], "test")
 
-    train_result = trainer.train()
-    train_wall_time = perf_counter() - train_start
+        max_seq_length = int(config["max_seq_length"])
+        dtype = None if config.get("dtype") in (None, "none", "None") else getattr(torch, config["dtype"])
 
-    model.save_pretrained(final_model_dir)
-    tokenizer.save_pretrained(final_model_dir)
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=config["model_name"],
+            max_seq_length=max_seq_length,
+            dtype=dtype,
+            load_in_4bit=bool(config.get("load_in_4bit", True)),
+        )
 
-    write_json(os.path.join(final_model_dir, "label2id.json"), label2id)
-    write_json(os.path.join(final_model_dir, "id2label.json"), {str(k): v for k, v in id2label.items()})
-    write_json(os.path.join(final_model_dir, "intent_labels.json"), sorted(label2id))
+        model = normalize_model_configs(model)
+        tokenizer = configure_tokenizer_for_causal_lm(tokenizer)
 
-    val_metrics, val_predictions = evaluate_generation(
-        model, tokenizer, val_df, label2id, label_list, config, "validation"
-    )
-    test_metrics, test_predictions = evaluate_generation(
-        model, tokenizer, test_df, label2id, label_list, config, "test"
-    )
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=int(config["lora_r"]),
+            target_modules=config["target_modules"],
+            lora_alpha=int(config["lora_alpha"]),
+            lora_dropout=float(config["lora_dropout"]),
+            bias=config.get("lora_bias", "none"),
+            use_gradient_checkpointing=config.get("use_gradient_checkpointing", True),
+            random_state=int(config["seed"]),
+            use_rslora=bool(config.get("use_rslora", False)),
+            loftq_config=None,
+        )
+        model_params = count_parameters(model)
 
-    finished_at = datetime.now(timezone.utc)
-    log_history_path = save_log_history(trainer.state.log_history, report_dir)
-    loss_plot_paths = save_loss_plots(trainer.state.log_history, report_dir)
-    performance_plot_paths = save_performance_plots(val_metrics, test_metrics, report_dir)
+        train_dataset = to_sft_dataset(train_df, label_list)
+        val_dataset = to_sft_dataset(val_df, label_list)
 
-    metrics_df = pd.DataFrame(
-        [
+        final_model_dir = ensure_dir(config.get("final_model_dir", output_dir))
+
+        training_args = build_training_args(config, output_dir)
+        trainer = build_sft_trainer(
+            model=model,
+            tokenizer=tokenizer,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            training_args=training_args,
+            config=config,
+        )
+
+        started_at = datetime.now(timezone.utc)
+        train_start = perf_counter()
+
+        print("===== UNSLOTH TRAINING CONFIG =====")
+        print(f"Model: {config['model_name']}")
+        print(f"Output dir: {output_dir}")
+        print(f"Report dir: {report_dir}")
+        print(f"Labels: {len(label2id)}")
+        print(f"Train/val/test: {len(train_df)}/{len(val_df)}/{len(test_df)}")
+
+        train_result = trainer.train()
+        train_wall_time = perf_counter() - train_start
+
+        model.save_pretrained(final_model_dir)
+        tokenizer.save_pretrained(final_model_dir)
+
+        write_json(os.path.join(final_model_dir, "label2id.json"), label2id)
+        write_json(os.path.join(final_model_dir, "id2label.json"), {str(k): v for k, v in id2label.items()})
+        write_json(os.path.join(final_model_dir, "intent_labels.json"), sorted(label2id))
+
+        val_metrics, val_predictions = evaluate_generation(
+            model, tokenizer, val_df, label2id, label_list, config, "validation"
+        )
+        test_metrics, test_predictions = evaluate_generation(
+            model, tokenizer, test_df, label2id, label_list, config, "test"
+        )
+
+        finished_at = datetime.now(timezone.utc)
+        log_history_path = save_log_history(trainer.state.log_history, report_dir)
+        train_logs_path = write_train_logs(
+            trainer.state.log_history,
+            report_dir,
+            config,
+            train_result,
+            train_wall_time,
+            started_at,
+            finished_at,
+        )
+        loss_plot_paths = save_loss_plots(trainer.state.log_history, report_dir)
+        performance_plot_paths = save_performance_plots(val_metrics, test_metrics, report_dir)
+
+        metrics_df = pd.DataFrame(
+            [
+                {
+                    "split": "train",
+                    "loss": train_result.metrics.get("train_loss"),
+                    "runtime_seconds": train_result.metrics.get("train_runtime"),
+                    "samples_per_second": train_result.metrics.get("train_samples_per_second"),
+                    "wall_time_seconds": train_wall_time,
+                },
+                val_metrics,
+                test_metrics,
+            ]
+        )
+        metrics_csv_path = os.path.join(report_dir, "metric.csv")
+        legacy_metrics_csv_path = os.path.join(report_dir, "metrics.csv")
+        metrics_json_path = os.path.join(report_dir, "metrics.json")
+        metrics_df.to_csv(metrics_csv_path, index=False)
+        metrics_df.to_csv(legacy_metrics_csv_path, index=False)
+        write_json(
+            metrics_json_path,
             {
-                "split": "train",
-                "loss": train_result.metrics.get("train_loss"),
-                "runtime_seconds": train_result.metrics.get("train_runtime"),
-                "samples_per_second": train_result.metrics.get("train_samples_per_second"),
-                "wall_time_seconds": train_wall_time,
+                "train": train_result.metrics,
+                "validation": val_metrics,
+                "test": test_metrics,
             },
-            val_metrics,
-            test_metrics,
-        ]
-    )
-    metrics_csv_path = os.path.join(report_dir, "metric.csv")
-    legacy_metrics_csv_path = os.path.join(report_dir, "metrics.csv")
-    metrics_json_path = os.path.join(report_dir, "metrics.json")
-    metrics_df.to_csv(metrics_csv_path, index=False)
-    metrics_df.to_csv(legacy_metrics_csv_path, index=False)
-    write_json(
-        metrics_json_path,
-        {
-            "train": train_result.metrics,
-            "validation": val_metrics,
-            "test": test_metrics,
-        },
-    )
-    val_predictions_path = os.path.join(report_dir, "val_predictions.csv")
-    test_predictions_path = os.path.join(report_dir, "test_predictions.csv")
-    train_config_path = os.path.join(report_dir, "train_config.json")
-    model_params_path = os.path.join(report_dir, "model_params.json")
-    val_predictions.to_csv(val_predictions_path, index=False)
-    test_predictions.to_csv(test_predictions_path, index=False)
-    write_json(train_config_path, config)
-    write_json(
-        model_params_path,
-        {
-            "model_name": config["model_name"],
+        )
+        val_predictions_path = os.path.join(report_dir, "val_predictions.csv")
+        test_predictions_path = os.path.join(report_dir, "test_predictions.csv")
+        train_config_path = os.path.join(report_dir, "train_config.json")
+        model_params_path = os.path.join(report_dir, "model_params.json")
+        val_predictions.to_csv(val_predictions_path, index=False)
+        test_predictions.to_csv(test_predictions_path, index=False)
+        write_json(train_config_path, config)
+        write_json(
+            model_params_path,
+            {
+                "model_name": config["model_name"],
+                "final_model_dir": final_model_dir,
+                "max_seq_length": config["max_seq_length"],
+                "load_in_4bit": config.get("load_in_4bit", True),
+                "lora_r": config["lora_r"],
+                "lora_alpha": config["lora_alpha"],
+                "lora_dropout": config["lora_dropout"],
+                "target_modules": config["target_modules"],
+                **model_params,
+            },
+        )
+
+        summary = {
+            "started_at_utc": started_at,
+            "finished_at_utc": finished_at,
+            "output_dir": output_dir,
             "final_model_dir": final_model_dir,
-            "max_seq_length": config["max_seq_length"],
-            "load_in_4bit": config.get("load_in_4bit", True),
-            "lora_r": config["lora_r"],
-            "lora_alpha": config["lora_alpha"],
-            "lora_dropout": config["lora_dropout"],
-            "target_modules": config["target_modules"],
-            **model_params,
-        },
-    )
+            "report_dir": report_dir,
+            "metrics_csv": metrics_csv_path,
+            "metric_csv": metrics_csv_path,
+            "legacy_metrics_csv": legacy_metrics_csv_path,
+            "metrics_json": metrics_json_path,
+            "train_log_history_csv": log_history_path,
+            "train_logs_txt": train_logs_path,
+            "val_predictions_csv": val_predictions_path,
+            "test_predictions_csv": test_predictions_path,
+            "train_config_json": train_config_path,
+            "model_params_json": model_params_path,
+            "plots": {
+                **loss_plot_paths,
+                **performance_plot_paths,
+            },
+            "train_metrics": train_result.metrics,
+            "validation_metrics": val_metrics,
+            "test_metrics": test_metrics,
+            "model_params": model_params,
+            "config": config,
+        }
+        write_json(os.path.join(report_dir, "summary.json"), summary)
 
-    summary = {
-        "started_at_utc": started_at,
-        "finished_at_utc": finished_at,
-        "output_dir": output_dir,
-        "final_model_dir": final_model_dir,
-        "report_dir": report_dir,
-        "metrics_csv": metrics_csv_path,
-        "metric_csv": metrics_csv_path,
-        "legacy_metrics_csv": legacy_metrics_csv_path,
-        "metrics_json": metrics_json_path,
-        "train_log_history_csv": log_history_path,
-        "val_predictions_csv": val_predictions_path,
-        "test_predictions_csv": test_predictions_path,
-        "train_config_json": train_config_path,
-        "model_params_json": model_params_path,
-        "plots": {
-            **loss_plot_paths,
-            **performance_plot_paths,
-        },
-        "train_metrics": train_result.metrics,
-        "validation_metrics": val_metrics,
-        "test_metrics": test_metrics,
-        "model_params": model_params,
-        "config": config,
-    }
-    write_json(os.path.join(report_dir, "summary.json"), summary)
+        print("===== VALIDATION RESULTS =====")
+        for key, value in val_metrics.items():
+            print(f"{key}: {value}")
 
-    print("===== VALIDATION RESULTS =====")
-    for key, value in val_metrics.items():
-        print(f"{key}: {value}")
+        print("===== TEST RESULTS =====")
+        for key, value in test_metrics.items():
+            print(f"{key}: {value}")
 
-    print("===== TEST RESULTS =====")
-    for key, value in test_metrics.items():
-        print(f"{key}: {value}")
-
-    print(f"Final LoRA adapter and tokenizer saved to: {final_model_dir}")
-    print(f"Temporary trainer output dir: {output_dir}")
-    print(f"Training report saved to: {report_dir}")
+        print(f"Final LoRA adapter and tokenizer saved to: {final_model_dir}")
+        print(f"Temporary trainer output dir: {output_dir}")
+        print(f"Training report saved to: {report_dir}")
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        terminal_log_file.close()
 
 
 if __name__ == "__main__":
