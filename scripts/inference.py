@@ -9,6 +9,9 @@ from time import perf_counter
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
+# Disable gradient checkpointing by default for inference/evaluation
+os.environ.setdefault("UNSLOTH_SKIP_GRADIENT_CHECKPOINTING", "1")
+
 warnings.filterwarnings(
     "ignore",
     message=r"Both `max_new_tokens`.*and `max_length`.*",
@@ -340,6 +343,10 @@ class IntentClassification:
         if device_id is not None:
             os.environ['CUDA_VISIBLE_DEVICES'] = str(device_id)
 
+        # Clear GPU cache before loading model to avoid OOM
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         self.model_dir = config.get("model_name_or_path") or config.get("finetuned_model_name_or_path")
         if not self.model_dir:
             raise ValueError("Config must define model_name_or_path or finetuned_model_name_or_path.")
@@ -354,12 +361,31 @@ class IntentClassification:
         self.id2label, self.label2id = load_label_mappings(self.id2label_path, self.label2id_path)
         self.label_list = build_label_list(self.id2label)
 
-        self.model, self.tokenizer = FastLanguageModel.from_pretrained(
-            model_name=self.model_dir,
-            max_seq_length=self.max_seq_length,
-            dtype=self.dtype,
-            load_in_4bit=self.load_in_4bit,
-        )
+        try:
+            self.model, self.tokenizer = FastLanguageModel.from_pretrained(
+                model_name=self.model_dir,
+                max_seq_length=self.max_seq_length,
+                dtype=self.dtype,
+                load_in_4bit=self.load_in_4bit,
+            )
+        except Exception as e:
+            if "out of memory" in str(e).lower() or "cuda error" in str(e).lower():
+                raise RuntimeError(
+                    f"GPU out of memory when loading model. Try one of:\n"
+                    f"  1. Set 'load_in_4bit: false' in config\n"
+                    f"  2. Reduce 'batch_size' in config\n"
+                    f"  3. Reduce 'max_seq_length' in config\n"
+                    f"  4. Set 'use_gradient_checkpointing: false' in config\n"
+                    f"  5. Use different GPU: --device 1 (if available)\n"
+                    f"Original error: {str(e)}"
+                ) from e
+            raise
+        
+        # Disable gradient checkpointing if specified in config
+        use_gradient_checkpointing = config.get("use_gradient_checkpointing", True)
+        if not use_gradient_checkpointing and hasattr(self.model, "gradient_checkpointing_disable"):
+            self.model.gradient_checkpointing_disable()
+        
         self.model = normalize_model_configs(self.model)
         self.tokenizer = configure_tokenizer_for_causal_lm(self.tokenizer)
         FastLanguageModel.for_inference(self.model)

@@ -1,6 +1,10 @@
 import argparse
 import os
 
+# Environment setup for inference/evaluation
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "")
+os.environ.setdefault("UNSLOTH_SKIP_GRADIENT_CHECKPOINTING", "1")
+
 
 def apply_overrides(config: dict, args):
     if args.eval_csv:
