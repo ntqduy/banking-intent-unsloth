@@ -6,6 +6,7 @@ import warnings
 from datetime import datetime, timezone
 from time import perf_counter
 
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 warnings.filterwarnings(
