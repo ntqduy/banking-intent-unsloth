@@ -159,6 +159,19 @@ def configure_tokenizer_for_causal_lm(tokenizer):
     return tokenizer
 
 
+def normalize_return_dict_config(model):
+    for config_attr in ("config", "generation_config"):
+        model_config = getattr(model, config_attr, None)
+        if model_config is None:
+            continue
+
+        config_dict = model_config.to_dict() if hasattr(model_config, "to_dict") else {}
+        if "use_return_dict" in config_dict and "return_dict" not in config_dict:
+            model_config.return_dict = bool(config_dict["use_return_dict"])
+
+    return model
+
+
 def predict_labels(model, tokenizer, df: pd.DataFrame, label2id: dict, label_list: str, config: dict):
     FastLanguageModel.for_inference(model)
     device = next(model.parameters()).device
@@ -466,6 +479,7 @@ def main(config_path: str):
         load_in_4bit=bool(config.get("load_in_4bit", True)),
     )
 
+    model = normalize_return_dict_config(model)
     tokenizer = configure_tokenizer_for_causal_lm(tokenizer)
 
     model = FastLanguageModel.get_peft_model(
@@ -475,7 +489,7 @@ def main(config_path: str):
         lora_alpha=int(config["lora_alpha"]),
         lora_dropout=float(config["lora_dropout"]),
         bias=config.get("lora_bias", "none"),
-        use_gradient_checkpointing=config.get("use_gradient_checkpointing", "unsloth"),
+        use_gradient_checkpointing=config.get("use_gradient_checkpointing", True),
         random_state=int(config["seed"]),
         use_rslora=bool(config.get("use_rslora", False)),
         loftq_config=None,

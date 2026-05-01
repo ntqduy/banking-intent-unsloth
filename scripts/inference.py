@@ -101,6 +101,19 @@ def configure_tokenizer_for_causal_lm(tokenizer):
     return tokenizer
 
 
+def normalize_return_dict_config(model):
+    for config_attr in ("config", "generation_config"):
+        model_config = getattr(model, config_attr, None)
+        if model_config is None:
+            continue
+
+        config_dict = model_config.to_dict() if hasattr(model_config, "to_dict") else {}
+        if "use_return_dict" in config_dict and "return_dict" not in config_dict:
+            model_config.return_dict = bool(config_dict["use_return_dict"])
+
+    return model
+
+
 def build_label_list(id2label: dict) -> str:
     return ", ".join(id2label[idx] for idx in sorted(id2label))
 
@@ -257,6 +270,7 @@ class IntentClassification:
             dtype=self.dtype,
             load_in_4bit=self.load_in_4bit,
         )
+        self.model = normalize_return_dict_config(self.model)
         self.tokenizer = configure_tokenizer_for_causal_lm(self.tokenizer)
         FastLanguageModel.for_inference(self.model)
         self.total_parameters = count_model_parameters(self.model)

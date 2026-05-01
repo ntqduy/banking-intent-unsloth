@@ -36,7 +36,7 @@ lora_r: 16
 lora_alpha: 16
 lora_dropout: 0.0
 lora_bias: none
-use_gradient_checkpointing: unsloth
+use_gradient_checkpointing: true
 use_rslora: false
 target_modules:
   - q_proj
