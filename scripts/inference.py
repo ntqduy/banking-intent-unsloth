@@ -335,6 +335,11 @@ class IntentClassification:
     def __init__(self, model_path):
         config = load_yaml_config(model_path)
 
+        # Set CUDA device if specified in config
+        device_id = config.get("device")
+        if device_id is not None:
+            os.environ['CUDA_VISIBLE_DEVICES'] = str(device_id)
+
         self.model_dir = config.get("model_name_or_path") or config.get("finetuned_model_name_or_path")
         if not self.model_dir:
             raise ValueError("Config must define model_name_or_path or finetuned_model_name_or_path.")

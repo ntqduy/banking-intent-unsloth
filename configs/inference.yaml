@@ -10,3 +10,4 @@ report_dir: result/inf_finetune
 batch_size: 4
 num_correct_samples: 5
 num_wrong_samples: 5
+device: 0

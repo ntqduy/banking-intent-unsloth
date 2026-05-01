@@ -483,6 +483,12 @@ def build_sft_trainer(model, tokenizer, train_dataset, val_dataset, training_arg
 
 def main(config_path: str):
     config = load_config(config_path)
+    
+    # Set CUDA device if specified in config
+    device_id = config.get("device")
+    if device_id is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(device_id)
+    
     set_seed(int(config["seed"]))
 
     label2id, id2label = load_label_mappings(config)

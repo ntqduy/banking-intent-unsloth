@@ -54,3 +54,5 @@ regularization_techniques:
   - lora_dropout_0
 augmentation_techniques:
   - none
+
+device: 0
