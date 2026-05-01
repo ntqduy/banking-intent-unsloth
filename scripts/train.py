@@ -83,6 +83,13 @@ def write_json(path: str, data):
         json.dump(to_serializable(data), f, ensure_ascii=False, indent=2)
 
 
+def write_text(path: str, text: str):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+        if not text.endswith("\n"):
+            f.write("\n")
+
+
 def load_split(csv_path: str, split_name: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     missing_columns = [c for c in REQUIRED_COLUMNS if c not in df.columns]
