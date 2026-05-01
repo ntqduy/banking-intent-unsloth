@@ -115,7 +115,7 @@ Main hyperparameters:
 | effective batch size | 16 |
 | learning rate | 2e-4 |
 | optimizer | adamw_8bit |
-| epochs | 3 |
+| epochs | 4 |
 | warmup steps | 169 |
 | weight decay | 0.01 |
 | LoRA rank | 16 |
