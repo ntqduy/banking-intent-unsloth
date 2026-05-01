@@ -2,9 +2,47 @@ import argparse
 import json
 import os
 import re
+import sys
 import warnings
 from datetime import datetime, timezone
 from time import perf_counter
+import yaml
+
+
+def bootstrap_cuda_device():
+    # Respect explicit user configuration if already set
+    if os.environ.get("CUDA_VISIBLE_DEVICES"):
+        return
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config")
+    parser.add_argument("--mode")
+    parser.add_argument("--base_config", default="configs/inference_base.yaml")
+    parser.add_argument("--finetuned_config", default="configs/inference.yaml")
+    args, _ = parser.parse_known_args()
+
+    config_path = args.config
+    if not config_path:
+        if args.mode == "base":
+            config_path = args.base_config
+        elif args.mode == "finetuned":
+            config_path = args.finetuned_config
+        elif args.mode == "both":
+            config_path = args.base_config
+        else:
+            config_path = args.finetuned_config
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+        device_id = config.get("device")
+        if device_id is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
+    except Exception:
+        return
+
+
+bootstrap_cuda_device()
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -39,7 +77,6 @@ except ImportError as exc:
 import numpy as np
 import pandas as pd
 import torch
-import yaml
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
 
@@ -295,13 +332,14 @@ def predict_batch(classifier, messages):
         for message in messages
     ]
     started = perf_counter()
+    target_device = classifier.target_device or next(classifier.model.parameters()).device
     inputs = classifier.tokenizer(
         prompts,
         return_tensors="pt",
         padding=True,
         truncation=True,
         max_length=classifier.max_seq_length,
-    ).to(next(classifier.model.parameters()).device)
+    ).to(target_device)
 
     prompt_lengths = inputs["input_ids"].shape[1]
     generation_max_length = prompt_lengths + classifier.max_new_tokens
@@ -348,6 +386,9 @@ class IntentClassification:
 
         # Set CUDA device if specified in config
         device_id = resolve_cuda_device(config.get("device"))
+        self.target_device = None
+        if device_id is not None and torch.cuda.is_available():
+            self.target_device = torch.device(f"cuda:{device_id}")
 
         # Clear GPU cache before loading model to avoid OOM
         if torch.cuda.is_available():
@@ -387,6 +428,10 @@ class IntentClassification:
                 ) from e
             raise
         
+        # Force model onto the configured device to avoid mixed-device tensors
+        if self.target_device is not None:
+            self.model = self.model.to(self.target_device)
+
         # Disable gradient checkpointing if specified in config
         use_gradient_checkpointing = config.get("use_gradient_checkpointing", True)
         if not use_gradient_checkpointing and hasattr(self.model, "gradient_checkpointing_disable"):
