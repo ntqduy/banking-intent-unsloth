@@ -138,6 +138,14 @@ def configure_tokenizer_for_causal_lm(tokenizer):
     return tokenizer
 
 
+def resolve_cuda_device(device_id):
+    if device_id is None or not torch.cuda.is_available():
+        return None
+    device_id = int(device_id)
+    torch.cuda.set_device(device_id)
+    return device_id
+
+
 def normalize_model_configs(model):
     for config_attr in ("config", "generation_config"):
         model_config = getattr(model, config_attr, None)
@@ -339,9 +347,7 @@ class IntentClassification:
         config = load_yaml_config(model_path)
 
         # Set CUDA device if specified in config
-        device_id = config.get("device")
-        if device_id is not None:
-            os.environ['CUDA_VISIBLE_DEVICES'] = str(device_id)
+        device_id = resolve_cuda_device(config.get("device"))
 
         # Clear GPU cache before loading model to avoid OOM
         if torch.cuda.is_available():
@@ -390,6 +396,7 @@ class IntentClassification:
         self.tokenizer = configure_tokenizer_for_causal_lm(self.tokenizer)
         FastLanguageModel.for_inference(self.model)
         self.total_parameters = count_model_parameters(self.model)
+        self.device_id = device_id
 
     def __call__(self, message):
         result = predict_batch(self, [message])
@@ -571,9 +578,38 @@ def compare_and_save_reports(base_summary: dict, finetune_summary: dict, report_
     return {"metric_csv": metric_csv_path, "result_txt": result_txt_path, "rows": rows}
 
 
+def write_both_inference_report(summaries: list[dict], report_dir: str):
+    report_dir = ensure_dir(report_dir)
+    report_path = os.path.join(report_dir, "inf_base_finetune.txt")
+    rows = []
+    for title, summary in (
+        ("===== Base Model =====", summaries[0]),
+        ("===== Fine-tuned Model =====", summaries[1]),
+    ):
+        metrics = summary["metrics"]
+        rows.extend(
+            [
+                title,
+                f"Accuracy:  {metrics.get('accuracy')}",
+                f"Precision: {metrics.get('precision')}",
+                f"Recall:    {metrics.get('recall')}",
+                f"F1:        {metrics.get('f1')}",
+                "",
+            ]
+        )
+        inf_path = summary["artifacts"]["inf_test_txt"]
+        if os.path.exists(inf_path):
+            with open(inf_path, "r", encoding="utf-8") as f:
+                rows.append(f.read().rstrip())
+        rows.append("")
+    write_text(report_path, "\n".join(rows))
+    return report_path
+
+
 def save_single_prediction(classifier, message: str, prediction_result: dict, report_dir: str):
     report_dir = ensure_dir(report_dir)
     prediction_path = os.path.join(report_dir, "single_prediction.json")
+    prediction_txt_path = os.path.join(report_dir, "single_prediction.txt")
     record = {
         "model_source": classifier.model_dir,
         "message": message,
@@ -591,6 +627,18 @@ def save_single_prediction(classifier, message: str, prediction_result: dict, re
         "created_at_utc": datetime.now(timezone.utc),
     }
     write_json(prediction_path, record)
+    write_text(
+        prediction_txt_path,
+        "\n".join(
+            [
+                f"model_source: {classifier.model_dir}",
+                f"message: {message}",
+                f"predicted_label: {prediction_result['predicted_labels'][0]}",
+                f"predicted_id: {prediction_result['predicted_ids'][0]}",
+                f"inference_time_seconds: {prediction_result['elapsed_seconds']}",
+            ]
+        ),
+    )
     return prediction_path
 
 
@@ -606,6 +654,15 @@ def main():
     parser.add_argument("--batch_size", type=int)
     args = parser.parse_args()
 
+    # Print device info
+    config_to_check = args.base_config if args.mode != "finetuned" else args.finetuned_config
+    config_preview = load_yaml_config(config_to_check)
+    device_id = config_preview.get("device")
+    if device_id is not None:
+        print(f"[INFERENCE] Using GPU device: {device_id}")
+    else:
+        print("[INFERENCE] Using default GPU device")
+
     if args.mode == "both":
         base_config = load_yaml_config(args.base_config)
         finetune_config = load_yaml_config(args.finetuned_config)
@@ -616,15 +673,20 @@ def main():
                 config["batch_size"] = args.batch_size
 
         if args.message:
-            for config in (base_config, finetune_config):
+            for title, config in (
+                ("===== Base Model =====", base_config),
+                ("===== Fine-tuned Model =====", finetune_config),
+            ):
                 classifier = IntentClassification(config)
                 prediction_result = predict_batch(classifier, [args.message])
                 prediction = prediction_result["predicted_labels"][0]
                 model_name, model_type = infer_model_display_name(classifier.model_dir)
                 report_dir = ensure_dir(default_report_dir_for_model(classifier.model_dir, "inf"))
                 save_single_prediction(classifier, args.message, prediction_result, report_dir)
+                print(title)
+                print(f"Model: {model_name} ({model_type})")
                 print(f"message: {args.message}")
-                print(f"Model {model_name} ({model_type}) predict: {prediction}")
+                print(f"predict: {prediction}")
             return
 
         eval_csv = base_config.get("eval_csv") or finetune_config.get("eval_csv")
@@ -632,22 +694,38 @@ def main():
             parser.error("Set eval_csv in configs or pass --eval_csv for --mode both.")
 
         summaries = []
-        for config in (base_config, finetune_config):
+        for title, config in (
+            ("===== Base Model =====", base_config),
+            ("===== Fine-tuned Model =====", finetune_config),
+        ):
             classifier = IntentClassification(config)
             report_dir = ensure_dir(default_report_dir_for_model(classifier.model_dir, "inf"))
             eval_df = load_eval_split(config.get("eval_csv", eval_csv), classifier.id2label)
             summary, _, _ = evaluate_and_save_report(classifier, eval_df, report_dir, config)
             model_name, model_type = infer_model_display_name(classifier.model_dir)
+            print(title)
+            print(f"Model: {model_name} ({model_type})")
             print_performance(summary["metrics"], f"{model_name} ({model_type}) PERFORMANCE")
+            print(f"Accuracy: {summary['metrics'].get('accuracy')}")
+            print(f"Precision: {summary['metrics'].get('precision')}")
+            print(f"Recall: {summary['metrics'].get('recall')}")
+            print(f"F1: {summary['metrics'].get('f1')}")
+            print(f"Prediction log: {summary['artifacts']['inf_test_txt']}")
+            with open(summary["artifacts"]["inf_test_txt"], "r", encoding="utf-8") as f:
+                print(f.read().rstrip())
             summaries.append(summary)
 
+        both_report_dir = ensure_dir(os.path.join("result", "inf_both"))
         comparison = compare_and_save_reports(
             base_summary=summaries[0],
             finetune_summary=summaries[1],
-            report_dir=os.path.join("result", "eval_base_finetune"),
+            report_dir=both_report_dir,
         )
-        print("Comparison result:", comparison["result_txt"])
-        print("Comparison metric CSV:", comparison["metric_csv"])
+        compare_csv_path = os.path.join(both_report_dir, "compare_base_finetune.csv")
+        pd.DataFrame(comparison["rows"]).to_csv(compare_csv_path, index=False)
+        both_report_path = write_both_inference_report(summaries, both_report_dir)
+        print("Comparison result:", both_report_path)
+        print("Comparison metric CSV:", compare_csv_path)
         return
 
     if args.mode == "base":
@@ -675,8 +753,9 @@ def main():
         prediction_result = predict_batch(classifier, [args.message])
         prediction = prediction_result["predicted_labels"][0]
         model_name, model_type = infer_model_display_name(classifier.model_dir)
+        print(f"===== {model_name} ({model_type}) =====")
         print(f"message: {args.message}")
-        print(f"Model {model_name} ({model_type}) predict: {prediction}")
+        print(f"predict: {prediction}")
         report_dir = ensure_dir(config.get("report_dir", default_report_dir_for_model(classifier.model_dir, "inf")))
         prediction_path = save_single_prediction(classifier, args.message, prediction_result, report_dir)
         print("Single prediction saved to:", prediction_path)
@@ -691,10 +770,18 @@ def main():
             config=config,
         )
 
+        model_name, model_type = infer_model_display_name(classifier.model_dir)
+        print(f"===== {model_name} ({model_type}) =====")
         print_performance(summary["metrics"])
+        print(f"Accuracy: {summary['metrics'].get('accuracy')}")
+        print(f"Precision: {summary['metrics'].get('precision')}")
+        print(f"Recall: {summary['metrics'].get('recall')}")
+        print(f"F1: {summary['metrics'].get('f1')}")
         print("Metric CSV:", summary["artifacts"]["metric_csv"])
         print("Predictions CSV:", summary["artifacts"]["predictions_csv"])
         print("Inference test TXT:", summary["artifacts"]["inf_test_txt"])
+        with open(summary["artifacts"]["inf_test_txt"], "r", encoding="utf-8") as f:
+            print(f.read().rstrip())
 
         if not correct_samples_df.empty:
             print("Correct samples preview:")

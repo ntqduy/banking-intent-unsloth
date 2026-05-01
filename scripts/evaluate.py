@@ -1,5 +1,6 @@
 import argparse
 import os
+import pandas as pd
 
 # Environment setup for inference/evaluation
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "")
@@ -16,7 +17,7 @@ def apply_overrides(config: dict, args):
     return config
 
 
-def evaluate_one(config: dict, report_dir: str):
+def evaluate_one(config: dict, report_dir: str, header_title: str | None = None):
     from inference import (
         IntentClassification,
         ensure_dir,
@@ -41,10 +42,22 @@ def evaluate_one(config: dict, report_dir: str):
     )
 
     model_name, model_type = infer_model_display_name(classifier.model_dir)
+    if header_title:
+        print(header_title)
+        print(f"Model: {model_name} ({model_type})")
+    else:
+        print(f"===== {model_name} ({model_type}) =====")
     print_performance(summary["metrics"], f"{model_name} ({model_type}) PERFORMANCE")
+    print(f"Accuracy: {summary['metrics'].get('accuracy')}")
+    print(f"Precision: {summary['metrics'].get('precision')}")
+    print(f"Recall: {summary['metrics'].get('recall')}")
+    print(f"F1: {summary['metrics'].get('f1')}")
     print("Evaluation log:", summary["artifacts"]["eval_full_pipeline_txt"])
     print("Metric CSV:", summary["artifacts"]["metric_csv"])
     print("Predictions CSV:", summary["artifacts"]["predictions_csv"])
+    print("Inference test TXT:", summary["artifacts"]["inf_test_txt"])
+    with open(summary["artifacts"]["inf_test_txt"], "r", encoding="utf-8") as f:
+        print(f.read().rstrip())
 
     if not correct_samples_df.empty:
         print("Correct samples preview:")
@@ -73,27 +86,56 @@ def main():
 
     from inference import compare_and_save_reports, infer_model_key, load_yaml_config
 
-    # Load base config to get device if not overridden
+    # Report device preference (actual device is set in inference.py via config)
     if args.device is None:
         base_config_preview = load_yaml_config(args.base_config)
         device_id = base_config_preview.get("device")
         if device_id is not None:
-            os.environ['CUDA_VISIBLE_DEVICES'] = str(device_id)
+            print(f"[EVALUATE] Using GPU device: {device_id}")
+        else:
+            print("[EVALUATE] Using default GPU device")
     else:
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(args.device)
+        print(f"[EVALUATE] Using GPU device: {args.device} (from command line)")
 
     if args.mode == "both":
         base_config = apply_overrides(load_yaml_config(args.base_config), args)
         finetune_config = apply_overrides(load_yaml_config(args.finetuned_config), args)
-        base_summary = evaluate_one(base_config, os.path.join("result", "evaluate_base"))
-        finetune_summary = evaluate_one(finetune_config, os.path.join("result", "evaluate_finetune"))
+        base_summary = evaluate_one(
+            base_config,
+            os.path.join("result", "evaluate_base"),
+            header_title="===== Base Model =====",
+        )
+        finetune_summary = evaluate_one(
+            finetune_config,
+            os.path.join("result", "evaluate_finetune"),
+            header_title="===== Fine-tuned Model =====",
+        )
+        both_report_dir = os.path.join("result", "evaluate_both")
+        os.makedirs(both_report_dir, exist_ok=True)
         comparison = compare_and_save_reports(
             base_summary=base_summary,
             finetune_summary=finetune_summary,
-            report_dir=os.path.join("result", "eval_base_finetune"),
+            report_dir=both_report_dir,
         )
-        print("Comparison result:", comparison["result_txt"])
-        print("Comparison metric CSV:", comparison["metric_csv"])
+        compare_csv_path = os.path.join(both_report_dir, "compare_base_finetune.csv")
+        with open(os.path.join(both_report_dir, "evaluate_base_finetune.txt"), "w", encoding="utf-8") as f:
+            f.write("===== Base Model =====\n")
+            f.write(f"Accuracy:  {base_summary['metrics'].get('accuracy')}\n")
+            f.write(f"Precision: {base_summary['metrics'].get('precision')}\n")
+            f.write(f"Recall:    {base_summary['metrics'].get('recall')}\n")
+            f.write(f"F1:        {base_summary['metrics'].get('f1')}\n\n")
+            with open(base_summary["artifacts"]["inf_test_txt"], "r", encoding="utf-8") as base_f:
+                f.write(base_f.read().rstrip())
+            f.write("\n\n===== Fine-tuned Model =====\n")
+            f.write(f"Accuracy:  {finetune_summary['metrics'].get('accuracy')}\n")
+            f.write(f"Precision: {finetune_summary['metrics'].get('precision')}\n")
+            f.write(f"Recall:    {finetune_summary['metrics'].get('recall')}\n")
+            f.write(f"F1:        {finetune_summary['metrics'].get('f1')}\n\n")
+            with open(finetune_summary["artifacts"]["inf_test_txt"], "r", encoding="utf-8") as fine_f:
+                f.write(fine_f.read().rstrip())
+        pd.DataFrame(comparison["rows"]).to_csv(compare_csv_path, index=False)
+        print("Comparison result:", os.path.join(both_report_dir, "evaluate_base_finetune.txt"))
+        print("Comparison metric CSV:", compare_csv_path)
         return
 
     if args.mode == "base":

@@ -486,8 +486,11 @@ def main(config_path: str):
     
     # Set CUDA device if specified in config
     device_id = config.get("device")
-    if device_id is not None:
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(device_id)
+    if device_id is not None and torch.cuda.is_available():
+        torch.cuda.set_device(int(device_id))
+        print(f"[TRAIN] Using GPU device: {device_id}")
+    else:
+        print("[TRAIN] Using default GPU device")
     
     set_seed(int(config["seed"]))
 
