@@ -43,6 +43,19 @@ def has_complete_clean_data(clean_dir: str) -> bool:
     return all(os.path.exists(path) for path in clean_file_paths(clean_dir).values())
 
 
+def analysis_file_paths(mapping_dir: str):
+    return {
+        "label2id": os.path.join(mapping_dir, "label2id.json"),
+        "id2label": os.path.join(mapping_dir, "id2label.json"),
+        "category_statistics": os.path.join(mapping_dir, "category_statistics.csv"),
+        "dataset_statistics": os.path.join(mapping_dir, "dataset_statistics.json"),
+    }
+
+
+def has_complete_analysis_data(mapping_dir: str) -> bool:
+    return all(os.path.exists(path) for path in analysis_file_paths(mapping_dir).values())
+
+
 def download_json(url: str):
     with urllib.request.urlopen(url) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -259,12 +272,19 @@ def main(args):
     os.makedirs(args.clean_dir, exist_ok=True)
     os.makedirs(args.mapping_dir, exist_ok=True)
 
-    if has_complete_clean_data(args.clean_dir) and not args.force_preprocess:
+    if (
+        has_complete_clean_data(args.clean_dir)
+        and has_complete_analysis_data(args.mapping_dir)
+        and not args.force_preprocess
+    ):
         paths = clean_file_paths(args.clean_dir)
+        analysis_paths = analysis_file_paths(args.mapping_dir)
         print("===== PREPROCESS SKIPPED =====")
         print(f"Clean train already exists: {paths['train']}")
         print(f"Clean val already exists:   {paths['val']}")
         print(f"Clean test already exists:  {paths['test']}")
+        print(f"Label2id already exists:    {analysis_paths['label2id']}")
+        print(f"Id2label already exists:    {analysis_paths['id2label']}")
         print("Use --force_preprocess to regenerate clean data.")
         return
 

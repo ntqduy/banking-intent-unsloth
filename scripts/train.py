@@ -347,8 +347,42 @@ def cuda_bf16_supported():
     return bool(torch.cuda.is_available() and torch.cuda.is_bf16_supported())
 
 
+def parse_optional_bool(value):
+    if value in (None, "auto", "Auto", "AUTO", "none", "None"):
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "1", "yes", "y"):
+            return True
+        if lowered in ("false", "0", "no", "n"):
+            return False
+    return bool(value)
+
+
+def resolve_precision_flags(config):
+    configured_fp16 = parse_optional_bool(config.get("fp16"))
+    configured_bf16 = parse_optional_bool(config.get("bf16"))
+
+    if configured_fp16 is not None or configured_bf16 is not None:
+        fp16 = bool(configured_fp16) if configured_fp16 is not None else False
+        bf16 = bool(configured_bf16) if configured_bf16 is not None else False
+    elif cuda_bf16_supported():
+        fp16 = False
+        bf16 = True
+    else:
+        fp16 = True
+        bf16 = False
+
+    if fp16 and bf16:
+        raise ValueError("Only one precision mode can be enabled. Set either fp16 or bf16, not both.")
+
+    return fp16, bf16
+
+
 def build_training_args(config, output_dir):
-    bf16_default = cuda_bf16_supported()
+    fp16, bf16 = resolve_precision_flags(config)
     common_args = {
         "output_dir": output_dir,
         "per_device_train_batch_size": int(config["batch_size"]),
@@ -366,8 +400,8 @@ def build_training_args(config, output_dir):
         "save_strategy": "epoch",
         "save_total_limit": int(config.get("save_total_limit", 2)),
         "report_to": "none",
-        "fp16": bool(config.get("fp16", not bf16_default)),
-        "bf16": bool(config.get("bf16", bf16_default)),
+        "fp16": fp16,
+        "bf16": bf16,
         "seed": int(config["seed"]),
     }
 
