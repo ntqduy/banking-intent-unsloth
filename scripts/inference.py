@@ -2,8 +2,27 @@ import argparse
 import json
 import os
 import re
+import warnings
 from datetime import datetime, timezone
 from time import perf_counter
+
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"Both `max_new_tokens`.*and `max_length`.*",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"The attention mask API under `transformers\.modeling_attn_mask_utils`.*",
+    category=FutureWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    module=r"transformers\.modeling_attn_mask_utils",
+)
+warnings.simplefilter("ignore", FutureWarning)
 
 try:
     from unsloth import FastLanguageModel
@@ -49,6 +68,20 @@ def load_optional_json(json_path: str):
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def append_text(path: str, text: str):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(text)
+        if not text.endswith("\n"):
+            f.write("\n")
+
+
+def write_text(path: str, text: str):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+        if not text.endswith("\n"):
+            f.write("\n")
 
 
 def to_serializable(value):
@@ -101,7 +134,7 @@ def configure_tokenizer_for_causal_lm(tokenizer):
     return tokenizer
 
 
-def normalize_return_dict_config(model):
+def normalize_model_configs(model):
     for config_attr in ("config", "generation_config"):
         model_config = getattr(model, config_attr, None)
         if model_config is None:
@@ -110,6 +143,8 @@ def normalize_return_dict_config(model):
         config_dict = model_config.to_dict() if hasattr(model_config, "to_dict") else {}
         if "use_return_dict" in config_dict and "return_dict" not in config_dict:
             model_config.return_dict = bool(config_dict["use_return_dict"])
+        if config_attr == "generation_config" and hasattr(model_config, "max_length"):
+            model_config.max_length = None
 
     return model
 
@@ -194,6 +229,54 @@ def load_label_mappings(id2label_path: str | None, label2id_path: str | None):
     return id2label, label2id
 
 
+def infer_model_display_name(model_dir: str):
+    normalized = str(model_dir).replace("\\", "/").lower()
+    finetune_markers = ("checkpoint", "finetune", "fine-tune", "final_weight", "final_lora", "lora_adapter")
+    if any(marker in normalized for marker in finetune_markers):
+        return "Qwen2.5-7B", "Fine-tuned"
+    return "Qwen2.5-7B", "Base"
+
+
+def infer_model_key(model_dir: str):
+    _, model_type = infer_model_display_name(model_dir)
+    return "finetune" if model_type == "Fine-tuned" else "base"
+
+
+def default_report_dir_for_model(model_dir: str, prefix: str):
+    return os.path.join("result", f"{prefix}_{infer_model_key(model_dir)}")
+
+
+def selected_metrics_record(metrics: dict):
+    return {
+        "model_source": metrics.get("model_source"),
+        "num_samples": metrics.get("num_samples"),
+        "accuracy": metrics.get("accuracy"),
+        "precision": metrics.get("precision"),
+        "recall": metrics.get("recall"),
+        "f1": metrics.get("f1"),
+        "gflops": (metrics.get("estimated_flops") / 1e9) if metrics.get("estimated_flops") is not None else None,
+        "inference_time_seconds": metrics.get("inference_time_seconds"),
+        "throughput_samples_per_second": metrics.get("throughput_samples_per_second") or metrics.get("samples_per_second"),
+    }
+
+
+def format_performance_lines(metrics: dict, title: str = "PERFORMANCE"):
+    selected = selected_metrics_record(metrics)
+    return [
+        f"===== {title} =====",
+        f"Accuracy:  {selected['accuracy']}",
+        f"Precision: {selected['precision']}",
+        f"Recall:    {selected['recall']}",
+        f"F1:        {selected['f1']}",
+        f"GFLOPs:    {selected['gflops']}",
+    ]
+
+
+def print_performance(metrics: dict, title: str = "PERFORMANCE"):
+    for line in format_performance_lines(metrics, title):
+        print(line)
+
+
 def predict_batch(classifier, messages):
     prompts = [
         build_prompt(normalize_text(message), classifier.label_list)
@@ -209,11 +292,12 @@ def predict_batch(classifier, messages):
     ).to(next(classifier.model.parameters()).device)
 
     prompt_lengths = inputs["input_ids"].shape[1]
+    generation_max_length = prompt_lengths + classifier.max_new_tokens
     input_token_count = int(inputs["attention_mask"].sum().item())
     with torch.inference_mode():
         output_ids = classifier.model.generate(
             **inputs,
-            max_new_tokens=classifier.max_new_tokens,
+            max_length=generation_max_length,
             do_sample=False,
             temperature=None,
             top_p=None,
@@ -270,7 +354,7 @@ class IntentClassification:
             dtype=self.dtype,
             load_in_4bit=self.load_in_4bit,
         )
-        self.model = normalize_return_dict_config(self.model)
+        self.model = normalize_model_configs(self.model)
         self.tokenizer = configure_tokenizer_for_causal_lm(self.tokenizer)
         FastLanguageModel.for_inference(self.model)
         self.total_parameters = count_model_parameters(self.model)
@@ -361,33 +445,98 @@ def evaluate_and_save_report(classifier, eval_df, report_dir: str, config: dict)
     correct_samples_df = predictions_df[predictions_df["correct"]].head(num_correct_samples)
     wrong_samples_df = predictions_df[~predictions_df["correct"]].head(num_wrong_samples)
 
-    metrics_csv_path = os.path.join(report_dir, "metrics.csv")
+    metrics_csv_path = os.path.join(report_dir, "metric.csv")
+    legacy_metrics_csv_path = os.path.join(report_dir, "metrics.csv")
     predictions_csv_path = os.path.join(report_dir, "predictions.csv")
     correct_samples_path = os.path.join(report_dir, "correct_samples.csv")
     wrong_samples_path = os.path.join(report_dir, "wrong_samples.csv")
     sample_predictions_path = os.path.join(report_dir, "sample_predictions.csv")
+    inf_test_path = os.path.join(report_dir, "inf_test.txt")
+    eval_log_path = os.path.join(report_dir, "eval_full_pipeline.txt")
     summary_json_path = os.path.join(report_dir, "summary.json")
 
-    pd.DataFrame([to_serializable(metrics_record)]).to_csv(metrics_csv_path, index=False)
+    metrics_df = pd.DataFrame([to_serializable(metrics_record)])
+    metrics_df.to_csv(metrics_csv_path, index=False)
+    metrics_df.to_csv(legacy_metrics_csv_path, index=False)
     predictions_df.to_csv(predictions_csv_path, index=False)
     correct_samples_df.to_csv(correct_samples_path, index=False)
     wrong_samples_df.to_csv(wrong_samples_path, index=False)
     pd.concat([correct_samples_df, wrong_samples_df], ignore_index=True).to_csv(sample_predictions_path, index=False)
+
+    inf_lines = []
+    for row in predictions_df.itertuples(index=False):
+        status = "TRUE" if row.correct else "FALSE"
+        inf_lines.append(
+            f"[{status}] predict={row.predicted_label} | GT={row.ground_truth_label} | message={row.sample}"
+        )
+    write_text(inf_test_path, "\n".join(inf_lines))
+
+    eval_lines = [
+        f"model_source: {classifier.model_dir}",
+        f"eval_csv: {config.get('eval_csv')}",
+        f"num_samples: {num_samples}",
+        f"num_correct: {metrics_record['num_correct']}",
+        f"num_incorrect: {metrics_record['num_incorrect']}",
+        "",
+        *format_performance_lines(metrics_record, "PERFORMANCE"),
+        "",
+        f"metric_csv: {metrics_csv_path}",
+        f"predictions_csv: {predictions_csv_path}",
+        f"inf_test_txt: {inf_test_path}",
+    ]
+    write_text(eval_log_path, "\n".join(eval_lines))
 
     summary = {
         "report_dir": report_dir,
         "metrics": metrics_record,
         "artifacts": {
             "metrics_csv": metrics_csv_path,
+            "metric_csv": metrics_csv_path,
+            "legacy_metrics_csv": legacy_metrics_csv_path,
             "predictions_csv": predictions_csv_path,
             "correct_samples_csv": correct_samples_path,
             "wrong_samples_csv": wrong_samples_path,
             "sample_predictions_csv": sample_predictions_path,
+            "inf_test_txt": inf_test_path,
+            "eval_full_pipeline_txt": eval_log_path,
             "summary_json": summary_json_path,
         },
     }
     write_json(summary_json_path, summary)
     return summary, correct_samples_df, wrong_samples_df
+
+
+def compare_and_save_reports(base_summary: dict, finetune_summary: dict, report_dir: str):
+    report_dir = ensure_dir(report_dir)
+    base_metrics = selected_metrics_record(base_summary["metrics"])
+    finetune_metrics = selected_metrics_record(finetune_summary["metrics"])
+
+    rows = []
+    for model_name, metrics in (("Base Qwen2.5-7B", base_metrics), ("Fine-tuned Unsloth LoRA model", finetune_metrics)):
+        row = {"model": model_name}
+        row.update(metrics)
+        rows.append(row)
+
+    metric_csv_path = os.path.join(report_dir, "metric.csv")
+    result_txt_path = os.path.join(report_dir, "result_base_finetune.txt")
+    pd.DataFrame(rows).to_csv(metric_csv_path, index=False)
+
+    lines = ["===== BASE VS FINE-TUNED COMPARISON ====="]
+    for row in rows:
+        lines.extend(
+            [
+                "",
+                f"Model: {row['model']}",
+                f"Accuracy:  {row.get('accuracy')}",
+                f"Precision: {row.get('precision')}",
+                f"Recall:    {row.get('recall')}",
+                f"F1:        {row.get('f1')}",
+                f"GFLOPs:    {row.get('gflops')}",
+                f"Inference time seconds: {row.get('inference_time_seconds')}",
+            ]
+        )
+    write_text(result_txt_path, "\n".join(lines))
+    return {"metric_csv": metric_csv_path, "result_txt": result_txt_path, "rows": rows}
 
 
 def save_single_prediction(classifier, message: str, prediction_result: dict, report_dir: str):
@@ -415,12 +564,66 @@ def save_single_prediction(classifier, message: str, prediction_result: dict, re
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--config", type=str)
+    parser.add_argument("--mode", choices=["finetuned", "base", "both"], default=None)
+    parser.add_argument("--base_config", type=str, default="configs/inference_base.yaml")
+    parser.add_argument("--finetuned_config", type=str, default="configs/inference.yaml")
     parser.add_argument("--message", type=str)
     parser.add_argument("--eval_csv", type=str)
     parser.add_argument("--report_dir", type=str)
     parser.add_argument("--batch_size", type=int)
     args = parser.parse_args()
+
+    if args.mode == "both":
+        base_config = load_yaml_config(args.base_config)
+        finetune_config = load_yaml_config(args.finetuned_config)
+        for config in (base_config, finetune_config):
+            if args.eval_csv:
+                config["eval_csv"] = args.eval_csv
+            if args.batch_size is not None:
+                config["batch_size"] = args.batch_size
+
+        if args.message:
+            for config in (base_config, finetune_config):
+                classifier = IntentClassification(config)
+                prediction_result = predict_batch(classifier, [args.message])
+                prediction = prediction_result["predicted_labels"][0]
+                model_name, model_type = infer_model_display_name(classifier.model_dir)
+                report_dir = ensure_dir(default_report_dir_for_model(classifier.model_dir, "inf"))
+                save_single_prediction(classifier, args.message, prediction_result, report_dir)
+                print(f"message: {args.message}")
+                print(f"Model {model_name} ({model_type}) predict: {prediction}")
+            return
+
+        eval_csv = base_config.get("eval_csv") or finetune_config.get("eval_csv")
+        if not eval_csv:
+            parser.error("Set eval_csv in configs or pass --eval_csv for --mode both.")
+
+        summaries = []
+        for config in (base_config, finetune_config):
+            classifier = IntentClassification(config)
+            report_dir = ensure_dir(default_report_dir_for_model(classifier.model_dir, "inf"))
+            eval_df = load_eval_split(config.get("eval_csv", eval_csv), classifier.id2label)
+            summary, _, _ = evaluate_and_save_report(classifier, eval_df, report_dir, config)
+            model_name, model_type = infer_model_display_name(classifier.model_dir)
+            print_performance(summary["metrics"], f"{model_name} ({model_type}) PERFORMANCE")
+            summaries.append(summary)
+
+        comparison = compare_and_save_reports(
+            base_summary=summaries[0],
+            finetune_summary=summaries[1],
+            report_dir=os.path.join("result", "eval_base_finetune"),
+        )
+        print("Comparison result:", comparison["result_txt"])
+        print("Comparison metric CSV:", comparison["metric_csv"])
+        return
+
+    if args.mode == "base":
+        args.config = args.config or args.base_config
+    elif args.mode == "finetuned":
+        args.config = args.config or args.finetuned_config
+    if not args.config:
+        args.config = args.finetuned_config
 
     config = load_yaml_config(args.config)
     if args.eval_csv:
@@ -439,15 +642,15 @@ def main():
     if args.message:
         prediction_result = predict_batch(classifier, [args.message])
         prediction = prediction_result["predicted_labels"][0]
-        print("Model source:", classifier.model_dir)
-        print("Input message:", args.message)
-        print("Predicted label:", prediction)
-        report_dir = ensure_dir(config.get("report_dir", "outputs/outputs_inf_finetune"))
+        model_name, model_type = infer_model_display_name(classifier.model_dir)
+        print(f"message: {args.message}")
+        print(f"Model {model_name} ({model_type}) predict: {prediction}")
+        report_dir = ensure_dir(config.get("report_dir", default_report_dir_for_model(classifier.model_dir, "inf")))
         prediction_path = save_single_prediction(classifier, args.message, prediction_result, report_dir)
         print("Single prediction saved to:", prediction_path)
 
     elif eval_csv:
-        report_dir = ensure_dir(config.get("report_dir", "outputs/outputs_inf_finetune"))
+        report_dir = ensure_dir(config.get("report_dir", default_report_dir_for_model(classifier.model_dir, "inf")))
         eval_df = load_eval_split(eval_csv, classifier.id2label)
         summary, correct_samples_df, wrong_samples_df = evaluate_and_save_report(
             classifier=classifier,
@@ -456,11 +659,10 @@ def main():
             config=config,
         )
 
-        print("===== EVALUATION SUMMARY =====")
-        for key, value in summary["metrics"].items():
-            print(f"{key}: {value}")
-        print("Metrics CSV:", summary["artifacts"]["metrics_csv"])
+        print_performance(summary["metrics"])
+        print("Metric CSV:", summary["artifacts"]["metric_csv"])
         print("Predictions CSV:", summary["artifacts"]["predictions_csv"])
+        print("Inference test TXT:", summary["artifacts"]["inf_test_txt"])
 
         if not correct_samples_df.empty:
             print("Correct samples preview:")

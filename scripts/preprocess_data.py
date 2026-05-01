@@ -394,7 +394,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--raw_dir", type=str, default="sample_data/original")
     parser.add_argument("--clean_dir", type=str, default="sample_data/clean_data")
-    parser.add_argument("--mapping_dir", type=str, default="outputs/outputs_train/analysis_data")
+    parser.add_argument("--mapping_dir", type=str, default="result/result_train/analysis_data")
     parser.add_argument("--use_cached_raw", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--force_preprocess",

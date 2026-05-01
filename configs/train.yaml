@@ -4,11 +4,12 @@ train_csv: sample_data/clean_data/train.csv
 val_csv: sample_data/clean_data/val.csv
 test_csv: sample_data/clean_data/test.csv
 
-label2id_path: outputs/outputs_train/analysis_data/label2id.json
-id2label_path: outputs/outputs_train/analysis_data/id2label.json
+label2id_path: result/result_train/analysis_data/label2id.json
+id2label_path: result/result_train/analysis_data/id2label.json
 
-output_dir: outputs/outputs_train/model_checkpoint
-report_dir: outputs/outputs_train
+output_dir: result/result_train/checkpoints
+final_model_dir: result/final_weight/final_lora_adapter
+report_dir: result/result_train
 
 max_seq_length: 512
 max_new_tokens: 12
@@ -23,6 +24,7 @@ max_steps: -1
 weight_decay: 0.01
 warmup_steps: 169
 logging_steps: 10
+save_strategy: epoch
 save_total_limit: 2
 seed: 42
 

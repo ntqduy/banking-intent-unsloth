@@ -1,12 +1,12 @@
-model_name_or_path: outputs/outputs_train/model_checkpoint
-id2label_path: outputs/outputs_train/model_checkpoint/id2label.json
-label2id_path: outputs/outputs_train/model_checkpoint/label2id.json
+model_name_or_path: result/final_weight/final_lora_adapter
+id2label_path: result/final_weight/final_lora_adapter/id2label.json
+label2id_path: result/final_weight/final_lora_adapter/label2id.json
 max_seq_length: 512
 max_new_tokens: 12
 load_in_4bit: true
 dtype: none
 eval_csv: sample_data/clean_data/test.csv
-report_dir: outputs/outputs_inf_finetune
+report_dir: result/inf_finetune
 batch_size: 4
 num_correct_samples: 5
 num_wrong_samples: 5

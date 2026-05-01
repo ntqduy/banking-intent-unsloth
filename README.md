@@ -23,12 +23,17 @@ banking-intent-unsloth/
 |   |   |-- train.csv
 |   |   |-- val.csv
 |   |   |-- test.csv
-|-- outputs/
-|   |-- outputs_train/
+|-- result/
+|   |-- result_train/
 |   |   |-- analysis_data/
-|   |   |-- model_checkpoint/
-|   |-- outputs_inf_finetune/
-|   |-- outputs_inf_base/
+|   |   |-- checkpoints/
+|   |-- final_weight/
+|   |   |-- final_lora_adapter/
+|   |-- inf_finetune/
+|   |-- inf_base/
+|   |-- evaluate_finetune/
+|   |-- evaluate_base/
+|   |-- eval_base_finetune/
 |-- train.sh
 |-- inference.sh
 |-- evaluate.sh
@@ -70,10 +75,10 @@ Generated model data:
 - `sample_data/clean_data/train.csv`
 - `sample_data/clean_data/val.csv`
 - `sample_data/clean_data/test.csv`
-- `outputs/outputs_train/analysis_data/label2id.json`
-- `outputs/outputs_train/analysis_data/id2label.json`
-- `outputs/outputs_train/analysis_data/dataset_statistics.json`
-- `outputs/outputs_train/analysis_data/category_statistics.csv`
+- `result/result_train/analysis_data/label2id.json`
+- `result/result_train/analysis_data/id2label.json`
+- `result/result_train/analysis_data/dataset_statistics.json`
+- `result/result_train/analysis_data/category_statistics.csv`
 
 Preprocessing includes lowercasing, whitespace cleanup, label mapping, optional per-label sampling from the original train split, and stratified train/validation splitting. The test split is the original BANKING77 test split after the same text normalization. Use `--samples_per_label 0` to train on all available original train samples.
 
@@ -130,6 +135,8 @@ Or run the full pipeline:
 bash train.sh
 ```
 
+The final lightweight LoRA adapter for inference is saved to `result/final_weight/final_lora_adapter/`. This is the folder to pull or copy when you only need the trained weights. Intermediate trainer checkpoints are still saved under `result/result_train/checkpoints/` for resume/debug, with `save_total_limit: 2` to avoid unlimited growth.
+
 ## Inference
 
 The required grading interface is implemented in `scripts/inference.py`:
@@ -145,13 +152,13 @@ print(predicted_label)
 Run a single example:
 
 ```bash
-python scripts/inference.py --config configs/inference.yaml --message "my card has not arrived yet"
+python scripts/inference.py --mode finetuned --message "my card has not arrived yet"
 ```
 
 Run a single example with the base model:
 
 ```bash
-python scripts/inference.py --config configs/inference_base.yaml --message "my card has not arrived yet"
+python scripts/inference.py --mode base --message "my card has not arrived yet"
 ```
 
 Shell helper:
@@ -159,6 +166,10 @@ Shell helper:
 ```bash
 bash inference.sh finetuned "my card has not arrived yet"
 bash inference.sh base "my card has not arrived yet"
+bash inference.sh both "my card has not arrived yet"
+bash inference.sh finetuned
+bash inference.sh base
+bash inference.sh both
 ```
 
 ## Evaluation
@@ -168,13 +179,13 @@ Use `scripts/evaluate.py` when you want to evaluate a model on a CSV split and s
 Evaluate the fine-tuned LoRA checkpoint:
 
 ```bash
-python scripts/evaluate.py --config configs/inference.yaml
+python scripts/evaluate.py --mode finetuned
 ```
 
 Evaluate the base Qwen2.5-7B model:
 
 ```bash
-python scripts/evaluate.py --config configs/inference_base.yaml
+python scripts/evaluate.py --mode base
 ```
 
 Shell helper:
@@ -182,23 +193,26 @@ Shell helper:
 ```bash
 bash evaluate.sh finetuned
 bash evaluate.sh base
+bash evaluate.sh both
 ```
 
 Optional arguments:
 
 ```bash
 python scripts/evaluate.py \
-  --config configs/inference.yaml \
+  --mode finetuned \
   --eval_csv sample_data/clean_data/test.csv \
-  --report_dir outputs/outputs_eval_custom \
+  --report_dir result/evaluate_custom \
   --batch_size 4
 ```
 
-Evaluation outputs are saved to the configured `report_dir`. The default fine-tuned report directory is `outputs/outputs_inf_finetune/`, and the default base-model report directory is `outputs/outputs_inf_base/`.
+Evaluation outputs are saved under `result/`. The default fine-tuned report directory is `result/evaluate_finetune/`, the default base-model report directory is `result/evaluate_base/`, and the comparison report is `result/eval_base_finetune/`.
 
 Each evaluation report contains:
 
-- `metrics.csv`
+- `metric.csv`
+- `eval_full_pipeline.txt`
+- `inf_test.txt`
 - `predictions.csv`
 - `correct_samples.csv`
 - `wrong_samples.csv`
@@ -207,7 +221,7 @@ Each evaluation report contains:
 
 ## Metrics
 
-The training and inference reports save the following metrics to `metrics.csv`, `metrics.json`, or `summary.json`.
+The training and inference reports save the following metrics to `metric.csv`, `metrics.json`, or `summary.json`.
 
 Classification metrics:
 

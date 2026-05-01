@@ -1,36 +1,31 @@
 import argparse
+import os
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/inference.yaml")
-    parser.add_argument("--eval_csv", type=str)
-    parser.add_argument("--report_dir", type=str)
-    parser.add_argument("--batch_size", type=int)
-    args = parser.parse_args()
+def apply_overrides(config: dict, args):
+    if args.eval_csv:
+        config["eval_csv"] = args.eval_csv
+    if args.batch_size is not None:
+        config["batch_size"] = args.batch_size
+    return config
 
+
+def evaluate_one(config: dict, report_dir: str):
     from inference import (
         IntentClassification,
         ensure_dir,
         evaluate_and_save_report,
+        infer_model_display_name,
         load_eval_split,
-        load_yaml_config,
+        print_performance,
     )
-
-    config = load_yaml_config(args.config)
-    if args.eval_csv:
-        config["eval_csv"] = args.eval_csv
-    if args.report_dir:
-        config["report_dir"] = args.report_dir
-    if args.batch_size is not None:
-        config["batch_size"] = args.batch_size
 
     eval_csv = config.get("eval_csv")
     if not eval_csv:
-        parser.error("Set eval_csv in the config or pass --eval_csv.")
+        raise ValueError("Set eval_csv in the config or pass --eval_csv.")
 
     classifier = IntentClassification(config)
-    report_dir = ensure_dir(config.get("report_dir", "outputs/outputs_eval"))
+    report_dir = ensure_dir(report_dir)
     eval_df = load_eval_split(eval_csv, classifier.id2label)
     summary, correct_samples_df, wrong_samples_df = evaluate_and_save_report(
         classifier=classifier,
@@ -39,10 +34,10 @@ def main():
         config=config,
     )
 
-    print("===== EVALUATION SUMMARY =====")
-    for key, value in summary["metrics"].items():
-        print(f"{key}: {value}")
-    print("Metrics CSV:", summary["artifacts"]["metrics_csv"])
+    model_name, model_type = infer_model_display_name(classifier.model_dir)
+    print_performance(summary["metrics"], f"{model_name} ({model_type}) PERFORMANCE")
+    print("Evaluation log:", summary["artifacts"]["eval_full_pipeline_txt"])
+    print("Metric CSV:", summary["artifacts"]["metric_csv"])
     print("Predictions CSV:", summary["artifacts"]["predictions_csv"])
 
     if not correct_samples_df.empty:
@@ -54,6 +49,51 @@ def main():
         print("Wrong samples preview:")
         for _, row in wrong_samples_df.iterrows():
             print(f"- {row['sample']} | GT={row['ground_truth_label']} | Pred={row['predicted_label']}")
+
+    return summary
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str)
+    parser.add_argument("--mode", choices=["finetuned", "base", "both"], default=None)
+    parser.add_argument("--base_config", type=str, default="configs/inference_base.yaml")
+    parser.add_argument("--finetuned_config", type=str, default="configs/inference.yaml")
+    parser.add_argument("--eval_csv", type=str)
+    parser.add_argument("--report_dir", type=str)
+    parser.add_argument("--batch_size", type=int)
+    args = parser.parse_args()
+
+    from inference import compare_and_save_reports, infer_model_key, load_yaml_config
+
+    if args.mode == "both":
+        base_config = apply_overrides(load_yaml_config(args.base_config), args)
+        finetune_config = apply_overrides(load_yaml_config(args.finetuned_config), args)
+        base_summary = evaluate_one(base_config, os.path.join("result", "evaluate_base"))
+        finetune_summary = evaluate_one(finetune_config, os.path.join("result", "evaluate_finetune"))
+        comparison = compare_and_save_reports(
+            base_summary=base_summary,
+            finetune_summary=finetune_summary,
+            report_dir=os.path.join("result", "eval_base_finetune"),
+        )
+        print("Comparison result:", comparison["result_txt"])
+        print("Comparison metric CSV:", comparison["metric_csv"])
+        return
+
+    if args.mode == "base":
+        config_path = args.config or args.base_config
+        default_report_dir = os.path.join("result", "evaluate_base")
+    elif args.mode == "finetuned":
+        config_path = args.config or args.finetuned_config
+        default_report_dir = os.path.join("result", "evaluate_finetune")
+    else:
+        config_path = args.config or args.finetuned_config
+        config_preview = load_yaml_config(config_path)
+        model_dir = config_preview.get("model_name_or_path") or config_preview.get("finetuned_model_name_or_path", "")
+        default_report_dir = os.path.join("result", f"evaluate_{infer_model_key(model_dir)}")
+
+    config = apply_overrides(load_yaml_config(config_path), args)
+    evaluate_one(config, args.report_dir or default_report_dir)
 
 
 if __name__ == "__main__":

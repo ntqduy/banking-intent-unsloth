@@ -2,8 +2,27 @@ import argparse
 import json
 import os
 import re
+import warnings
 from datetime import datetime, timezone
 from time import perf_counter
+
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"Both `max_new_tokens`.*and `max_length`.*",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"The attention mask API under `transformers\.modeling_attn_mask_utils`.*",
+    category=FutureWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    module=r"transformers\.modeling_attn_mask_utils",
+)
+warnings.simplefilter("ignore", FutureWarning)
 
 try:
     from unsloth import FastLanguageModel
@@ -159,7 +178,7 @@ def configure_tokenizer_for_causal_lm(tokenizer):
     return tokenizer
 
 
-def normalize_return_dict_config(model):
+def normalize_model_configs(model):
     for config_attr in ("config", "generation_config"):
         model_config = getattr(model, config_attr, None)
         if model_config is None:
@@ -168,6 +187,8 @@ def normalize_return_dict_config(model):
         config_dict = model_config.to_dict() if hasattr(model_config, "to_dict") else {}
         if "use_return_dict" in config_dict and "return_dict" not in config_dict:
             model_config.return_dict = bool(config_dict["use_return_dict"])
+        if config_attr == "generation_config" and hasattr(model_config, "max_length"):
+            model_config.max_length = None
 
     return model
 
@@ -196,11 +217,12 @@ def predict_labels(model, tokenizer, df: pd.DataFrame, label2id: dict, label_lis
         ).to(device)
 
         prompt_lengths = inputs["input_ids"].shape[1]
+        generation_max_length = prompt_lengths + max_new_tokens
         total_input_tokens += int(inputs["attention_mask"].sum().item())
         with torch.inference_mode():
             output_ids = model.generate(
                 **inputs,
-                max_new_tokens=max_new_tokens,
+                max_length=generation_max_length,
                 do_sample=False,
                 temperature=None,
                 top_p=None,
@@ -417,7 +439,7 @@ def build_training_args(config, output_dir):
         "lr_scheduler_type": config.get("lr_scheduler_type", "linear"),
         "logging_steps": int(config["logging_steps"]),
         "eval_strategy": "epoch",
-        "save_strategy": "epoch",
+        "save_strategy": config.get("save_strategy", "no"),
         "save_total_limit": int(config.get("save_total_limit", 2)),
         "report_to": "none",
         "fp16": fp16,
@@ -479,7 +501,7 @@ def main(config_path: str):
         load_in_4bit=bool(config.get("load_in_4bit", True)),
     )
 
-    model = normalize_return_dict_config(model)
+    model = normalize_model_configs(model)
     tokenizer = configure_tokenizer_for_causal_lm(tokenizer)
 
     model = FastLanguageModel.get_peft_model(
@@ -500,6 +522,7 @@ def main(config_path: str):
     val_dataset = to_sft_dataset(val_df, label_list)
 
     output_dir = ensure_dir(config["output_dir"])
+    final_model_dir = ensure_dir(config.get("final_model_dir", output_dir))
     report_dir = ensure_dir(config.get("report_dir", os.path.dirname(output_dir) or output_dir))
 
     training_args = build_training_args(config, output_dir)
@@ -525,12 +548,12 @@ def main(config_path: str):
     train_result = trainer.train()
     train_wall_time = perf_counter() - train_start
 
-    model.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir)
+    model.save_pretrained(final_model_dir)
+    tokenizer.save_pretrained(final_model_dir)
 
-    write_json(os.path.join(output_dir, "label2id.json"), label2id)
-    write_json(os.path.join(output_dir, "id2label.json"), {str(k): v for k, v in id2label.items()})
-    write_json(os.path.join(output_dir, "intent_labels.json"), sorted(label2id))
+    write_json(os.path.join(final_model_dir, "label2id.json"), label2id)
+    write_json(os.path.join(final_model_dir, "id2label.json"), {str(k): v for k, v in id2label.items()})
+    write_json(os.path.join(final_model_dir, "intent_labels.json"), sorted(label2id))
 
     val_metrics, val_predictions = evaluate_generation(
         model, tokenizer, val_df, label2id, label_list, config, "validation"
@@ -557,9 +580,11 @@ def main(config_path: str):
             test_metrics,
         ]
     )
-    metrics_csv_path = os.path.join(report_dir, "metrics.csv")
+    metrics_csv_path = os.path.join(report_dir, "metric.csv")
+    legacy_metrics_csv_path = os.path.join(report_dir, "metrics.csv")
     metrics_json_path = os.path.join(report_dir, "metrics.json")
     metrics_df.to_csv(metrics_csv_path, index=False)
+    metrics_df.to_csv(legacy_metrics_csv_path, index=False)
     write_json(
         metrics_json_path,
         {
@@ -579,6 +604,7 @@ def main(config_path: str):
         model_params_path,
         {
             "model_name": config["model_name"],
+            "final_model_dir": final_model_dir,
             "max_seq_length": config["max_seq_length"],
             "load_in_4bit": config.get("load_in_4bit", True),
             "lora_r": config["lora_r"],
@@ -593,8 +619,11 @@ def main(config_path: str):
         "started_at_utc": started_at,
         "finished_at_utc": finished_at,
         "output_dir": output_dir,
+        "final_model_dir": final_model_dir,
         "report_dir": report_dir,
         "metrics_csv": metrics_csv_path,
+        "metric_csv": metrics_csv_path,
+        "legacy_metrics_csv": legacy_metrics_csv_path,
         "metrics_json": metrics_json_path,
         "train_log_history_csv": log_history_path,
         "val_predictions_csv": val_predictions_path,
@@ -621,7 +650,8 @@ def main(config_path: str):
     for key, value in test_metrics.items():
         print(f"{key}: {value}")
 
-    print(f"LoRA checkpoint and tokenizer saved to: {output_dir}")
+    print(f"Final LoRA adapter and tokenizer saved to: {final_model_dir}")
+    print(f"Temporary trainer output dir: {output_dir}")
     print(f"Training report saved to: {report_dir}")
 
 
