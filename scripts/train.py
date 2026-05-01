@@ -152,6 +152,13 @@ def estimate_inference_flops(num_parameters: int, token_count: int):
     return float(2 * num_parameters * token_count)
 
 
+def configure_tokenizer_for_causal_lm(tokenizer):
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token or "<|PAD_TOKEN|>"
+    tokenizer.padding_side = "left"
+    return tokenizer
+
+
 def predict_labels(model, tokenizer, df: pd.DataFrame, label2id: dict, label_list: str, config: dict):
     FastLanguageModel.for_inference(model)
     device = next(model.parameters()).device
@@ -185,7 +192,7 @@ def predict_labels(model, tokenizer, df: pd.DataFrame, label2id: dict, label_lis
                 temperature=None,
                 top_p=None,
                 top_k=None,
-                pad_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id,
             )
 
         generated_ids = output_ids[:, prompt_lengths:]
@@ -391,7 +398,7 @@ def build_training_args(config, output_dir):
         "learning_rate": float(config["learning_rate"]),
         "num_train_epochs": float(config["num_train_epochs"]),
         "max_steps": int(config.get("max_steps", -1)),
-        "warmup_ratio": float(config["warmup_ratio"]),
+        "warmup_steps": int(config.get("warmup_steps", 0)),
         "weight_decay": float(config["weight_decay"]),
         "optim": config["optimizer"],
         "lr_scheduler_type": config.get("lr_scheduler_type", "linear"),
@@ -459,9 +466,7 @@ def main(config_path: str):
         load_in_4bit=bool(config.get("load_in_4bit", True)),
     )
 
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
+    tokenizer = configure_tokenizer_for_causal_lm(tokenizer)
 
     model = FastLanguageModel.get_peft_model(
         model,

@@ -94,6 +94,13 @@ def estimate_inference_flops(num_parameters: int, token_count: int):
     return float(2 * num_parameters * token_count)
 
 
+def configure_tokenizer_for_causal_lm(tokenizer):
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token or "<|PAD_TOKEN|>"
+    tokenizer.padding_side = "left"
+    return tokenizer
+
+
 def build_label_list(id2label: dict) -> str:
     return ", ".join(id2label[idx] for idx in sorted(id2label))
 
@@ -198,7 +205,7 @@ def predict_batch(classifier, messages):
             temperature=None,
             top_p=None,
             top_k=None,
-            pad_token_id=classifier.tokenizer.eos_token_id,
+            pad_token_id=classifier.tokenizer.pad_token_id,
         )
 
     generated_ids = output_ids[:, prompt_lengths:]
@@ -250,9 +257,7 @@ class IntentClassification:
             dtype=self.dtype,
             load_in_4bit=self.load_in_4bit,
         )
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.tokenizer.padding_side = "left"
+        self.tokenizer = configure_tokenizer_for_causal_lm(self.tokenizer)
         FastLanguageModel.for_inference(self.model)
         self.total_parameters = count_model_parameters(self.model)
 

@@ -111,7 +111,7 @@ Main hyperparameters:
 | learning rate | 2e-4 |
 | optimizer | adamw_8bit |
 | epochs | 3 |
-| warmup ratio | 0.1 |
+| warmup steps | 169 |
 | weight decay | 0.01 |
 | LoRA rank | 16 |
 | LoRA alpha | 16 |
