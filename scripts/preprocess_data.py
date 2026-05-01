@@ -1,11 +1,93 @@
 import argparse
 import json
 import os
+import urllib.request
 
 import pandas as pd
 from datasets import load_dataset
 from sklearn.model_selection import train_test_split
+_TRAIN_DOWNLOAD_URL = (
+    "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/master/banking_data/train.csv"
+)
+_TEST_DOWNLOAD_URL = "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/master/banking_data/test.csv"
+_CATEGORY_DOWNLOAD_URL = "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/master/banking_data/categories.json"
 
+
+def raw_file_paths(raw_dir: str):
+    return {
+        "train": os.path.join(raw_dir, "train.csv"),
+        "test": os.path.join(raw_dir, "test.csv"),
+        "category": os.path.join(raw_dir, "category.json"),
+        "categories": os.path.join(raw_dir, "categories.json"),
+    }
+
+
+def clean_file_paths(clean_dir: str):
+    return {
+        "train": os.path.join(clean_dir, "train.csv"),
+        "val": os.path.join(clean_dir, "val.csv"),
+        "test": os.path.join(clean_dir, "test.csv"),
+    }
+
+
+def has_complete_raw_data(raw_dir: str) -> bool:
+    paths = raw_file_paths(raw_dir)
+    return (
+        os.path.exists(paths["train"])
+        and os.path.exists(paths["test"])
+        and (os.path.exists(paths["category"]) or os.path.exists(paths["categories"]))
+    )
+
+
+def has_complete_clean_data(clean_dir: str) -> bool:
+    return all(os.path.exists(path) for path in clean_file_paths(clean_dir).values())
+
+
+def download_json(url: str):
+    with urllib.request.urlopen(url) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def download_raw_banking77(raw_dir: str):
+    os.makedirs(raw_dir, exist_ok=True)
+    paths = raw_file_paths(raw_dir)
+
+    try:
+        train_df = pd.read_csv(_TRAIN_DOWNLOAD_URL)
+        test_df = pd.read_csv(_TEST_DOWNLOAD_URL)
+        categories = download_json(_CATEGORY_DOWNLOAD_URL)
+
+        train_df.to_csv(paths["train"], index=False)
+        test_df.to_csv(paths["test"], index=False)
+        save_json(paths["categories"], categories)
+        print(f"Downloaded raw BANKING77 CSV files to: {raw_dir}")
+        return
+    except Exception as exc:
+        print(f"Direct CSV download failed, falling back to HuggingFace datasets: {exc}")
+
+    dataset = load_banking77()
+    train_ds = dataset["train"]
+    test_ds = dataset["test"]
+    categories = list(train_ds.features["label"].names)
+    id2label = {idx: label_name for idx, label_name in enumerate(categories)}
+
+    train_df = pd.DataFrame(
+        {
+            "text": list(train_ds["text"]),
+            "category": [id2label[int(label)] for label in train_ds["label"]],
+        }
+    )
+    test_df = pd.DataFrame(
+        {
+            "text": list(test_ds["text"]),
+            "category": [id2label[int(label)] for label in test_ds["label"]],
+        }
+    )
+
+    train_df.to_csv(paths["train"], index=False)
+    test_df.to_csv(paths["test"], index=False)
+    save_json(paths["categories"], categories)
+    print(f"Downloaded raw BANKING77 files from HuggingFace to: {raw_dir}")
 
 def normalize_text(text: str) -> str:
     text = str(text).strip().lower().replace("\n", " ")
@@ -177,47 +259,34 @@ def main(args):
     os.makedirs(args.clean_dir, exist_ok=True)
     os.makedirs(args.mapping_dir, exist_ok=True)
 
-    cached_raw = load_cached_raw_data(args.raw_dir) if args.use_cached_raw else None
-    if cached_raw is not None:
-        raw_train_df, raw_test_df, label2id, id2label = cached_raw
-        print(f"Using cached raw BANKING77 files from: {args.raw_dir}")
-    else:
-        dataset = load_banking77()
-        train_ds = dataset["train"]
-        test_ds = dataset["test"]
+    if has_complete_clean_data(args.clean_dir) and not args.force_preprocess:
+        paths = clean_file_paths(args.clean_dir)
+        print("===== PREPROCESS SKIPPED =====")
+        print(f"Clean train already exists: {paths['train']}")
+        print(f"Clean val already exists:   {paths['val']}")
+        print(f"Clean test already exists:  {paths['test']}")
+        print("Use --force_preprocess to regenerate clean data.")
+        return
 
-        label_names = list(train_ds.features["label"].names)
-        label2id = {label_name: idx for idx, label_name in enumerate(label_names)}
-        id2label = {idx: label_name for label_name, idx in label2id.items()}
+    if not args.use_cached_raw or not has_complete_raw_data(args.raw_dir):
+        reason = "Refresh requested" if not args.use_cached_raw else "Raw BANKING77 files are missing or incomplete"
+        print(f"{reason} in: {args.raw_dir}")
+        download_raw_banking77(args.raw_dir)
 
-        raw_train_df = pd.DataFrame({
-            "text": list(train_ds["text"]),
-            "label": list(train_ds["label"]),
-        })
-        raw_test_df = pd.DataFrame({
-            "text": list(test_ds["text"]),
-            "label": list(test_ds["label"]),
-        })
+    cached_raw = load_cached_raw_data(args.raw_dir)
+    if cached_raw is None:
+        raise RuntimeError(
+            "Raw BANKING77 files could not be loaded. Expected train.csv, test.csv, "
+            "and category.json or categories.json in the raw data directory."
+        )
+
+    raw_train_df, raw_test_df, label2id, id2label = cached_raw
+    print(f"Using raw BANKING77 files from: {args.raw_dir}")
 
     raw_train_df = normalize_raw_schema(raw_train_df, label2id, id2label)
     raw_test_df = normalize_raw_schema(raw_test_df, label2id, id2label)
 
-    if cached_raw is None:
-        raw_train_path = os.path.join(args.raw_dir, "train.csv")
-        raw_test_path = os.path.join(args.raw_dir, "test.csv")
-        raw_category_path = os.path.join(args.raw_dir, "category.json")
-        raw_train_df.to_csv(raw_train_path, index=False)
-        raw_test_df.to_csv(raw_test_path, index=False)
-        save_json(
-            raw_category_path,
-            {
-                "label2id": label2id,
-                "id2label": {str(k): v for k, v in id2label.items()},
-            },
-        )
-        print(f"Raw BANKING77 files saved to: {args.raw_dir}")
-    else:
-        print("Original files were only read; no files in sample_data/original were rewritten.")
+    print("Original files were only read; no files in sample_data/original were rewritten.")
 
     # Model data lives only in sample_data/clean_data.
     # Train/val are split from original train. Test keeps the original test split.
@@ -307,6 +376,11 @@ if __name__ == "__main__":
     parser.add_argument("--clean_dir", type=str, default="sample_data/clean_data")
     parser.add_argument("--mapping_dir", type=str, default="outputs/outputs_train/analysis_data")
     parser.add_argument("--use_cached_raw", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--force_preprocess",
+        action="store_true",
+        help="Regenerate clean train/val/test files even when they already exist.",
+    )
     parser.add_argument("--val_size", type=float, default=0.1)
     parser.add_argument(
         "--samples_per_label",
