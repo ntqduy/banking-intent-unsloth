@@ -161,6 +161,12 @@ Run a single example with the base model:
 python scripts/inference.py --mode base --message "my card has not arrived yet"
 ```
 
+Run a single example with both base and fine-tuned models:
+
+```bash
+python scripts/inference.py --mode both --message "my card has not arrived yet"
+```
+
 Shell helper:
 
 ```bash
@@ -174,7 +180,7 @@ bash inference.sh both
 
 ## Evaluation
 
-Use `scripts/evaluate.py` when you want to evaluate a model on a CSV split and save the full report without running single-message inference.
+Use `scripts/evaluate.py` to evaluate models on a CSV split and save the full report without running single-message inference. You can evaluate individual models or both models together for comparison.
 
 Evaluate the fine-tuned LoRA checkpoint:
 
@@ -186,6 +192,12 @@ Evaluate the base Qwen2.5-7B model:
 
 ```bash
 python scripts/evaluate.py --mode base
+```
+
+Evaluate both models and compare:
+
+```bash
+python scripts/evaluate.py --mode both
 ```
 
 Shell helper:
@@ -203,6 +215,11 @@ python scripts/evaluate.py \
   --mode finetuned \
   --eval_csv sample_data/clean_data/test.csv \
   --report_dir result/evaluate_custom \
+  --batch_size 4
+
+python scripts/evaluate.py \
+  --mode both \
+  --eval_csv sample_data/clean_data/test.csv \
   --batch_size 4
 ```
 
