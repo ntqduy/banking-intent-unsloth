@@ -7,6 +7,8 @@ def apply_overrides(config: dict, args):
         config["eval_csv"] = args.eval_csv
     if args.batch_size is not None:
         config["batch_size"] = args.batch_size
+    if args.device is not None:
+        config["device"] = args.device
     return config
 
 
@@ -62,9 +64,19 @@ def main():
     parser.add_argument("--eval_csv", type=str)
     parser.add_argument("--report_dir", type=str)
     parser.add_argument("--batch_size", type=int)
+    parser.add_argument("--device", type=int, help="GPU device ID (0, 1, 2, ...)")
     args = parser.parse_args()
 
     from inference import compare_and_save_reports, infer_model_key, load_yaml_config
+
+    # Load base config to get device if not overridden
+    if args.device is None:
+        base_config_preview = load_yaml_config(args.base_config)
+        device_id = base_config_preview.get("device")
+        if device_id is not None:
+            os.environ['CUDA_VISIBLE_DEVICES'] = str(device_id)
+    else:
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(args.device)
 
     if args.mode == "both":
         base_config = apply_overrides(load_yaml_config(args.base_config), args)
