@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import warnings
 from datetime import datetime, timezone
@@ -109,6 +110,16 @@ def load_optional_json(json_path: str):
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def ensure_clean_data(eval_csv: str | None):
+    if not eval_csv:
+        return
+    if os.path.exists(eval_csv):
+        return
+    script_path = os.path.join(os.path.dirname(__file__), "preprocess_data.py")
+    print(f"[DATA] Missing {eval_csv}. Running preprocess_data.py to generate clean data...")
+    subprocess.run([sys.executable, script_path, "--samples_per_label", "0"], check=True)
 
 
 def append_text(path: str, text: str):
@@ -738,6 +749,8 @@ def main():
         if not eval_csv:
             parser.error("Set eval_csv in configs or pass --eval_csv for --mode both.")
 
+        ensure_clean_data(eval_csv)
+
         summaries = []
         for title, config in (
             ("===== Base Model =====", base_config),
@@ -806,6 +819,7 @@ def main():
         print("Single prediction saved to:", prediction_path)
 
     elif eval_csv:
+        ensure_clean_data(eval_csv)
         report_dir = ensure_dir(config.get("report_dir", default_report_dir_for_model(classifier.model_dir, "inf")))
         eval_df = load_eval_split(eval_csv, classifier.id2label)
         summary, correct_samples_df, wrong_samples_df = evaluate_and_save_report(

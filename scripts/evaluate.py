@@ -1,5 +1,7 @@
 import argparse
 import os
+import subprocess
+import sys
 import pandas as pd
 
 # Environment setup for inference/evaluation
@@ -17,6 +19,16 @@ def apply_overrides(config: dict, args):
     return config
 
 
+def ensure_clean_data(eval_csv: str | None):
+    if not eval_csv:
+        return
+    if os.path.exists(eval_csv):
+        return
+    script_path = os.path.join(os.path.dirname(__file__), "preprocess_data.py")
+    print(f"[DATA] Missing {eval_csv}. Running preprocess_data.py to generate clean data...")
+    subprocess.run([sys.executable, script_path, "--samples_per_label", "0"], check=True)
+
+
 def evaluate_one(config: dict, report_dir: str, header_title: str | None = None):
     from inference import (
         IntentClassification,
@@ -30,6 +42,8 @@ def evaluate_one(config: dict, report_dir: str, header_title: str | None = None)
     eval_csv = config.get("eval_csv")
     if not eval_csv:
         raise ValueError("Set eval_csv in the config or pass --eval_csv.")
+
+    ensure_clean_data(eval_csv)
 
     classifier = IntentClassification(config)
     report_dir = ensure_dir(report_dir)
