@@ -1,0 +1,16 @@
+model_source: unsloth/Qwen2.5-7B
+eval_csv: sample_data/clean_data/test.csv
+num_samples: 3080
+num_correct: 1640
+num_incorrect: 1440
+
+===== PERFORMANCE =====
+Accuracy:  0.5324675324675324
+Precision: 0.6301291362109747
+Recall:    0.5324675324675324
+F1:        0.5086739584136613
+GFLOPs:    13023971.198343167
+
+metric_csv: result/inf_base/metric.csv
+predictions_csv: result/inf_base/predictions.csv
+inf_test_txt: result/inf_base/inf_test.txt

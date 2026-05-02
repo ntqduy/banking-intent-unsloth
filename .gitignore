@@ -4,6 +4,6 @@
 # Python cache
 __pycache__/
 *.pyc
-outputs/
-result/
 sample_data/
+result/result_train/checkpoints/
+result/final_weight/

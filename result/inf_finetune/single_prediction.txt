@@ -1,0 +1,5 @@
+model_source: result/final_weight/final_lora_adapter
+message: my card has not arrived yet
+predicted_label: card_arrival
+predicted_id: 0
+inference_time_seconds: 0.3244856680000794

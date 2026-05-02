@@ -1,0 +1,6 @@
+sample_id,sample,ground_truth_id,ground_truth_label,predicted_id,predicted_label,raw_generation,correct
+0,how do i locate my card?,0,card_arrival,-1,card_location, card_location,False
+1,"i still have not received my new card, i ordered over a week ago.",0,card_arrival,7,card_delivery_estimate, card_delivery_estimate,False
+6,do you know if there is a tracking number for the new card you sent me?,0,card_arrival,7,card_delivery_estimate, card_delivery_estimate,False
+8,still waiting on that card,0,card_arrival,7,card_delivery_estimate, card_delivery_estimate,False
+9,is it normal to have to wait over a week for my new card?,0,card_arrival,7,card_delivery_estimate, card_delivery_estimate,False

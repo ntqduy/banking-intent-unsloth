@@ -1,0 +1,22 @@
+{
+  "model_name": "unsloth/Qwen2.5-7B",
+  "final_model_dir": "result/final_weight/final_lora_adapter",
+  "max_seq_length": 512,
+  "load_in_4bit": true,
+  "lora_r": 16,
+  "lora_alpha": 16,
+  "lora_dropout": 0.0,
+  "target_modules": [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+  ],
+  "total_parameters": 5063120384,
+  "trainable_parameters": 40370176,
+  "non_trainable_parameters": 5022750208,
+  "trainable_percent": 0.7973378655497518
+}

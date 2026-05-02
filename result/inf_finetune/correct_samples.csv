@@ -1,0 +1,6 @@
+sample_id,sample,ground_truth_id,ground_truth_label,predicted_id,predicted_label,raw_generation,correct
+0,how do i locate my card?,0,card_arrival,0,card_arrival, card_arrival,True
+1,"i still have not received my new card, i ordered over a week ago.",0,card_arrival,0,card_arrival, card_arrival,True
+2,i ordered a card but it has not arrived. help please!,0,card_arrival,0,card_arrival, card_arrival,True
+3,is there a way to know when my card will arrive?,0,card_arrival,0,card_arrival, card_arrival,True
+4,my card has not arrived yet.,0,card_arrival,0,card_arrival, card_arrival,True

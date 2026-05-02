@@ -2,42 +2,50 @@
 
 This project fine-tunes an intent detection model on BANKING77 using Unsloth LoRA/QLoRA. The model is trained as an instruction-style classifier: given a banking customer message and the allowed intent labels, it generates exactly one intent label.
 
+- Dataset: [Hugging Face - banking77](https://huggingface.co/datasets/PolyAI/banking77)
+- Unsloth guide: [Fine-tuning LLMs](https://unsloth.ai/docs/get-started/fine-tuning-llms-guide)
+- Experiment machine: Google Colab with NVIDIA A100-SXM4-40GB
+
+## Video Demonstration
+
+Add the Google Drive video link here after recording the demo:
+
+- Video link: [Video Demo](https://drive.google.com/drive/folders/1tJQd62qg8M38oRkKlMDLv70Cod-NcJ2R?usp=drive_link)
+
+The video should show running inference, at least one input message, the predicted intent label, and the final test accuracy.
+
+- Fine-tuned weights: [Finetune Model](https://drive.google.com/drive/folders/1tJQd62qg8M38oRkKlMDLv70Cod-NcJ2R?usp=drive_link)
+
 ## Project Structure
 
 ```text
 banking-intent-unsloth/
-|-- scripts/
-|   |-- preprocess_data.py
-|   |-- train.py
-|   |-- inference.py
-|   |-- evaluate.py
-|-- configs/
+|-- scripts/                  # Data prep, training, inference, evaluation
+|   |-- preprocess_data.py    # Download + preprocess BANKING77
+|   |-- train.py              # Fine-tune model with Unsloth + LoRA
+|   |-- inference.py          # Inference for base/finetuned/both
+|   |-- evaluate.py           # Evaluation + comparison reports
+|-- configs/                  # YAML configs for train/inference
 |   |-- train.yaml
 |   |-- inference.yaml
 |   |-- inference_base.yaml
-|-- sample_data/
-|   |-- original/
-|   |   |-- train.csv
-|   |   |-- test.csv
-|   |-- clean_data/
-|   |   |-- train.csv
-|   |   |-- val.csv
-|   |   |-- test.csv
-|-- result/
-|   |-- result_train/
-|   |   |-- analysis_data/
-|   |   |-- checkpoints/
-|   |-- final_weight/
-|   |   |-- final_lora_adapter/
-|   |-- inf_finetune/
-|   |-- inf_base/
-|   |-- evaluate_finetune/
-|   |-- evaluate_base/
-|   |-- eval_base_finetune/
-|-- train.sh
-|-- inference.sh
-|-- evaluate.sh
+|-- sample_data/              # Dataset storage
+|   |-- original/             # Raw downloaded data
+|   |-- clean_data/           # Preprocessed train/val/test splits
+|-- result/                   # Outputs (logs, metrics, predictions)
+|   |-- result_train/         # Training outputs and reports
+|   |-- final_weight/         # Final LoRA adapter weights
+|   |-- inf_base/             # Base-model inference outputs
+|   |-- inf_finetune/         # Fine-tuned inference outputs
+|   |-- inf_both/             # Base vs fine-tuned inference comparison
+|   |-- evaluate_base/        # Base-model evaluation outputs
+|   |-- evaluate_finetune/    # Fine-tuned evaluation outputs
+|   |-- evaluate_both/        # Base vs fine-tuned evaluation comparison
+|-- train.sh                  # Run preprocess + train
+|-- inference.sh              # Inference helper
+|-- evaluate.sh               # Evaluation helper
 |-- requirements.txt
+|-- train_inference_eval.ipynb
 |-- README.md
 ```
 
@@ -46,13 +54,54 @@ banking-intent-unsloth/
 Unsloth is best run on Linux, Google Colab, or Kaggle with a CUDA GPU.
 
 ```bash
+git clone "https://github.com/ntqduy/banking-intent-unsloth.git"
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-On Windows, use WSL2 or run the notebook/script on Colab/Kaggle if Unsloth or `bitsandbytes` installation fails.
+On Windows, use WSL2 or run on Colab/Kaggle if Unsloth or `bitsandbytes` installation fails.
 
+## Download
+
+### Download weights
+If you want to run inference without training, download the fine-tuned weights from [Finetune Model](https://drive.google.com/drive/folders/1tJQd62qg8M38oRkKlMDLv70Cod-NcJ2R?usp=drive_link) and extract them to `result/final_weight/` or:
+
+1) Install `gdown` (if not already installed):
+
+```bash
+pip install gdown
+```
+
+2) Download the weights from Google Drive:
+
+```bash
+gdown 1JjAjd5sz3VXnSSIJKmBFcb3acmP7QNcz
+```
+
+3) Extract the adapter to the expected folder:
+
+```bash
+mkdir -p result/final_weight/final_lora_adapter
+unzip final_lora_adapter.zip -d result/final_weight/
+```
+
+4) Verify files exist:
+
+```bash
+ls result/final_weight/final_lora_adapter
+```
+
+The folder should contain `adapter_model.safetensors`, `adapter_config.json`, and label mapping files.
+
+### Download dataset
+Manual download:
+- Create folder: `sample_data/original/`
+- Download from [Hugging Face - banking77](https://huggingface.co/datasets/PolyAI/banking77)
+- Copy `train.csv`, `test.csv`, and `categories.json` into `sample_data/original/`
+
+Auto download:
+- Run preprocessing or training. Evaluation/inference will also auto-download when `eval_csv` is missing.
 ## Data Preparation
 
 The dataset is BANKING77. By default, preprocessing keeps the full original training split and creates a stratified train/validation split.
@@ -68,44 +117,36 @@ python scripts/preprocess_data.py --samples_per_label 0
 python scripts/preprocess_data.py --samples_per_label 40 --val_size 0.1 --seed 42
 ```
 
-Original raw files are kept in `sample_data/original` and are not rewritten when cached files already exist. Model-ready data is saved only under `sample_data/clean_data`.
-
-Generated model data:
-
-- `sample_data/clean_data/train.csv`
-- `sample_data/clean_data/val.csv`
-- `sample_data/clean_data/test.csv`
-- `result/result_train/analysis_data/label2id.json`
-- `result/result_train/analysis_data/id2label.json`
-- `result/result_train/analysis_data/dataset_statistics.json`
-- `result/result_train/analysis_data/category_statistics.csv`
-
-Preprocessing includes lowercasing, whitespace cleanup, label mapping, optional per-label sampling from the original train split, and stratified train/validation splitting. The test split is the original BANKING77 test split after the same text normalization. Use `--samples_per_label 0` to train on all available original train samples.
+Notes:
+- Raw files stay in `sample_data/original`.
+- Preprocessed splits are saved under `sample_data/clean_data`.
+- Evaluation/inference will auto-run preprocessing if `eval_csv` is missing.
 
 ## Fine-Tuning with Unsloth
 
-Training configuration is in `configs/train.yaml`.
+### Training configuration is in `configs/train.yaml`.
 
 Default model:
-
 - `unsloth/Qwen2.5-7B`
 
-Sample count from `sample_data/original` and the default preprocessing configuration:
+### Raw Dataset (BANKING77)
 
-| Split | Number of samples | Note |
+| Split | Number of Samples | Note |
 |---|---:|---|
-| Original train | 10,003 | Raw BANKING77 train samples from `sample_data/original/train.csv` |
-| Original test | 3,080 | Raw BANKING77 test samples from `sample_data/original/test.csv` |
-| Original total | 13,083 | Original train + original test |
-| Number of intent labels | 77 | From `sample_data/original/categories.json` |
-| Train source after preprocessing | 10,003 | Full original train split because `samples_per_label=0` |
-| Fine-tuning train split | 9,002 | 90% of the original train source after stratified split |
-| Validation split | 1,001 | 10% of the original train source after stratified split |
-| Test split | 3,080 | Original BANKING77 test split, used only for final evaluation |
+| Original Train | 10,003 | Raw samples from the original dataset |
+| Original Test | 3,080 | Raw samples from the original dataset |
+| Original Total | 13,083 | Combined train + test |
+| Intent Labels | 77 | Unique intent categories |
 
-Only the `9,002` fine-tuning train samples are used to update the LoRA weights. The validation split is used for evaluation during training, and the original test split is kept for final reporting.
+### Fine-tuning Data Preparation
 
-Main hyperparameters:
+| Split | Number of Samples | Note |
+|---|---:|---|
+| Fine-tuning Train | 9,002 | 90% of original train split |
+| Validation | 1,001 | 10% of original train split |
+| Test | 3,080 | Original test split (unchanged) |
+
+### Main hyperparameters:
 
 | Hyperparameter | Value |
 |---|---:|
@@ -123,7 +164,26 @@ Main hyperparameters:
 | LoRA dropout | 0.0 |
 | quantization | 4-bit QLoRA |
 
-Train:
+### Additional fine-tuning parameters:
+- `max_steps`: -1 (use epoch-based training)
+- `eval_batch_size`: 4
+- `save_strategy`: epoch
+- `save_total_limit`: 2
+- `use_gradient_checkpointing`: true
+- `load_in_4bit`: true
+- `fp16`/`bf16`: auto
+- `device`: 0
+
+### Model Parameters
+
+| Parameter Type | Count |
+|---|---:|
+| Total parameters | 5,063,120,384 |
+| Trainable parameters | 40,370,176 |
+| Non-trainable parameters | 5,022,750,208 |
+| Trainable percent | 0.7973% |
+
+### Train:
 
 ```bash
 python scripts/train.py --config configs/train.yaml
@@ -134,9 +194,6 @@ Or run the full pipeline:
 ```bash
 bash train.sh
 ```
-
-The final lightweight LoRA adapter for inference is saved to `result/final_weight/final_lora_adapter/`. This is the folder to pull or copy when you only need the trained weights. Intermediate trainer checkpoints are still saved under `result/result_train/checkpoints/` for resume/debug, with `save_total_limit: 2` to avoid unlimited growth.
-
 ## Inference
 
 The required grading interface is implemented in `scripts/inference.py`:
@@ -149,21 +206,11 @@ predicted_label = classifier("my card has not arrived yet")
 print(predicted_label)
 ```
 
-Run a single example:
+Single message:
 
 ```bash
 python scripts/inference.py --mode finetuned --message "my card has not arrived yet"
-```
-
-Run a single example with the base model:
-
-```bash
 python scripts/inference.py --mode base --message "my card has not arrived yet"
-```
-
-Run a single example with both base and fine-tuned models:
-
-```bash
 python scripts/inference.py --mode both --message "my card has not arrived yet"
 ```
 
@@ -177,26 +224,13 @@ bash inference.sh finetuned
 bash inference.sh base
 bash inference.sh both
 ```
-
 ## Evaluation
 
-Use `scripts/evaluate.py` to evaluate models on a CSV split and save the full report without running single-message inference. You can evaluate individual models or both models together for comparison.
-
-Evaluate the fine-tuned LoRA checkpoint:
+Use `scripts/evaluate.py` to evaluate models on a CSV split and save the full report.
 
 ```bash
 python scripts/evaluate.py --mode finetuned
-```
-
-Evaluate the base Qwen2.5-7B model:
-
-```bash
 python scripts/evaluate.py --mode base
-```
-
-Evaluate both models and compare:
-
-```bash
 python scripts/evaluate.py --mode both
 ```
 
@@ -222,35 +256,13 @@ python scripts/evaluate.py \
   --eval_csv sample_data/clean_data/test.csv \
   --batch_size 4
 ```
-
-Evaluation outputs are saved under `result/`. The default fine-tuned report directory is `result/evaluate_finetune/`, the default base-model report directory is `result/evaluate_base/`, and the comparison report is `result/eval_base_finetune/`.
-
-Each evaluation report contains:
-
-- `metric.csv`
-- `eval_full_pipeline.txt`
-- `inf_test.txt`
-- `predictions.csv`
-- `correct_samples.csv`
-- `wrong_samples.csv`
-- `sample_predictions.csv`
-- `summary.json`
-
 ## Metrics
-
-The training and inference reports save the following metrics to `metric.csv`, `metrics.json`, or `summary.json`.
 
 Classification metrics:
 
-- Accuracy:
-
 ```text
 Accuracy = number of correct predictions / total number of samples
-```
 
-- Precision, recall, and F1 are computed with weighted averaging across intent labels:
-
-```text
 Precision_c = TP_c / (TP_c + FP_c)
 Recall_c = TP_c / (TP_c + FN_c)
 F1_c = 2 * Precision_c * Recall_c / (Precision_c + Recall_c)
@@ -262,65 +274,23 @@ Weighted F1        = sum_c support_c * F1_c / sum_c support_c
 
 Inference speed metrics:
 
-- Inference time:
-
 ```text
 Inference time = finish_time - start_time
-```
-
-- Average inference time per sample:
-
-```text
 Average inference time per sample = total inference time / number of samples
-```
-
-- FPS, also reported as throughput in samples/second:
-
-```text
 FPS = number of samples / total inference time
-```
-
-- Generated tokens per second:
-
-```text
 Generated tokens per second = number of generated tokens / total inference time
 ```
 
 Computational cost metrics:
 
-- Processed token count:
-
 ```text
 Processed tokens = input tokens + generated tokens
-```
-
-- Estimated FLOPs:
-
-```text
 Estimated FLOPs = 2 * number of model parameters * processed tokens
-```
-
-- Estimated FLOPs per second:
-
-```text
 Estimated FLOPs/s = estimated FLOPs / total inference time
 ```
 
-The FLOPs value is an approximation for decoder-only LLM inference. It is useful for comparing runs in this project, but it is not a hardware-profiler measurement.
-
 ## Result Table
-
-Fill this table after running training and inference:
-
-| Model | Accuracy | Precision | Recall | F1 | Inference Time | Estimated FLOPs |
+| Model | Accuracy | Precision | Recall | F1 | Inference Time (s) | Estimated FLOPs (GFLOPs) |
 |---|---:|---:|---:|---:|---:|---:|
-| Base Qwen2.5-7B | ... | ... | ... | ... | ... | ... |
-| Fine-tuned Unsloth LoRA model | ... | ... | ... | ... | ... | ... |
-
-## Video Demonstration
-
-Add the Google Drive video link here after recording the demo:
-
-- Video link: ...
-
-The video should show running inference, at least one input message, the predicted intent label, and the final test accuracy.
+| Base Qwen2.5-7B | 0.5325 | 0.6301 | 0.5325 | 0.5087 | 404.9995 | 13023971.1983 |
+| Fine-tuned Unsloth LoRA model | 0.9166 | 0.9206 | 0.9166 | 0.9172 | 355.7830 | 13029818.7933 |

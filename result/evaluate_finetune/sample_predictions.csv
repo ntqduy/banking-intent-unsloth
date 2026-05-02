@@ -1,0 +1,11 @@
+sample_id,sample,ground_truth_id,ground_truth_label,predicted_id,predicted_label,raw_generation,correct
+0,how do i locate my card?,0,card_arrival,0,card_arrival, card_arrival,True
+1,"i still have not received my new card, i ordered over a week ago.",0,card_arrival,0,card_arrival, card_arrival,True
+2,i ordered a card but it has not arrived. help please!,0,card_arrival,0,card_arrival, card_arrival,True
+3,is there a way to know when my card will arrive?,0,card_arrival,0,card_arrival, card_arrival,True
+4,my card has not arrived yet.,0,card_arrival,0,card_arrival, card_arrival,True
+5,when will i get my card?,0,card_arrival,7,card_delivery_estimate, card_delivery_estimate,False
+11,how long does a card delivery take?,0,card_arrival,7,card_delivery_estimate, card_delivery_estimate,False
+79,can i link another card to my account?,1,card_linking,60,getting_spare_card, getting_spare_card,False
+98,what currencies is an exchange rate calculated in?,2,exchange_rate,10,exchange_via_app, exchange_via_app,False
+138,why am i being charged more ?,3,card_payment_wrong_exchange_rate,20,card_payment_fee_charged, card_payment_fee_charged,False

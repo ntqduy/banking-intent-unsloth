@@ -1,0 +1,16 @@
+model_source: result/final_weight/final_lora_adapter
+eval_csv: sample_data/clean_data/test.csv
+num_samples: 3080
+num_correct: 2823
+num_incorrect: 257
+
+===== PERFORMANCE =====
+Accuracy:  0.9165584415584416
+Precision: 0.92061253493997
+Recall:    0.9165584415584416
+F1:        0.917179115179509
+GFLOPs:    13029818.793334784
+
+metric_csv: result/evaluate_finetune/metric.csv
+predictions_csv: result/evaluate_finetune/predictions.csv
+inf_test_txt: result/evaluate_finetune/inf_test.txt

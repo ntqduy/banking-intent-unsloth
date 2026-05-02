@@ -1,0 +1,5 @@
+model_source: unsloth/Qwen2.5-7B
+message: my card has not arrived yet
+predicted_label: card_arrival
+predicted_id: 0
+inference_time_seconds: 1.9214593659999082

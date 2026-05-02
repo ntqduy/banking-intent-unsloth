@@ -1,0 +1,51 @@
+{
+  "train": {
+    "train_runtime": 6785.7886,
+    "train_samples_per_second": 5.306,
+    "train_steps_per_second": 0.332,
+    "train_loss": 0.10665095379480143,
+    "epoch": 4.0
+  },
+  "validation": {
+    "accuracy": 0.9100899100899101,
+    "precision": 0.9118824154349774,
+    "recall": 0.9100899100899101,
+    "f1": 0.908979674239757,
+    "split": "validation",
+    "num_samples": 1001,
+    "inference_time_seconds": 129.47969191893935,
+    "runtime_seconds": 129.47969191893935,
+    "average_inference_time_ms_per_sample": 129.350341577362,
+    "fps": 7.730942089564711,
+    "samples_per_second": 7.730942089564711,
+    "model_parameter_count": 5063120384,
+    "input_token_count": 413735,
+    "generated_token_count": 6892,
+    "processed_token_count": 420627,
+    "estimated_flops": 4259370275521536.0,
+    "estimated_tflops": 4259.370275521536,
+    "estimated_flops_per_second": 32896048889181.1,
+    "estimated_tflops_per_second": 32.8960488891811
+  },
+  "test": {
+    "accuracy": 0.9165584415584416,
+    "precision": 0.92061253493997,
+    "recall": 0.9165584415584416,
+    "f1": 0.917179115179509,
+    "split": "test",
+    "num_samples": 3080,
+    "inference_time_seconds": 312.24023950845003,
+    "runtime_seconds": 312.24023950845003,
+    "average_inference_time_ms_per_sample": 101.37670113910715,
+    "fps": 9.864199453756335,
+    "samples_per_second": 9.864199453756335,
+    "model_parameter_count": 5063120384,
+    "input_token_count": 1271098,
+    "generated_token_count": 15640,
+    "processed_token_count": 1286738,
+    "estimated_flops": 1.3029818793334784e+16,
+    "estimated_tflops": 13029.818793334784,
+    "estimated_flops_per_second": 41730107605115.914,
+    "estimated_tflops_per_second": 41.73010760511591
+  }
+}
