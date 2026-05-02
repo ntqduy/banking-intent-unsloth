@@ -8,7 +8,7 @@ F1:        0.5086739584136613
 GFLOPs:    13023971.198343167
 Inference time seconds: 404.9994908840056
 
-Model: Fine-tuned Unsloth LoRA model
+Model: Fine-tuned Unsloth QLoRA model
 Accuracy:  0.9165584415584416
 Precision: 0.92061253493997
 Recall:    0.9165584415584416

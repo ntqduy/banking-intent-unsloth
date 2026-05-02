@@ -607,7 +607,7 @@ def compare_and_save_reports(base_summary: dict, finetune_summary: dict, report_
     finetune_metrics = selected_metrics_record(finetune_summary["metrics"])
 
     rows = []
-    for model_name, metrics in (("Base Qwen2.5-7B", base_metrics), ("Fine-tuned Unsloth LoRA model", finetune_metrics)):
+    for model_name, metrics in (("Base Qwen2.5-7B", base_metrics), ("Fine-tuned Unsloth QLoRA model", finetune_metrics)):
         row = {"model": model_name}
         row.update(metrics)
         rows.append(row)
